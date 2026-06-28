@@ -23,6 +23,7 @@ import {
   handleListKnowledge,
   handleGetKnowledge,
   handleAttestKnowledge,
+  handleListConnections,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
@@ -65,6 +66,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const budget = budgetRaw ? Number(budgetRaw) : undefined;
     const mode = url.searchParams.get("mode") ?? undefined;
     return send(res, handleCatalogRetrieve(q, budget, mode));
+  }
+
+  // GET /connections?projectId=&piece=&format=json|context&budget= ->
+  //   REFERENCIAS de credenciales (nombre/piece/auth) del vault. NUNCA secretos.
+  if (method === "GET" && pathname === "/connections") {
+    const projectId = url.searchParams.get("projectId") ?? undefined;
+    const piece = url.searchParams.get("piece") ?? undefined;
+    const format = url.searchParams.get("format") ?? undefined;
+    const budgetRaw = url.searchParams.get("budget");
+    const budget = budgetRaw ? Number(budgetRaw) : undefined;
+    return send(res, handleListConnections({ projectId, piece, format, budget }));
   }
 
   if (method === "GET" && pathname.startsWith("/pieces/")) {

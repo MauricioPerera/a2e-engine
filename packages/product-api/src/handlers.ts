@@ -38,7 +38,11 @@ import {
 } from "../../workflow-registry/src/workflow-store.js";
 import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
 import { demoPieces } from "./pieces-catalog.js";
-import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID } from "./mock-backend.js";
+import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID, getVault } from "./mock-backend.js";
+import {
+  renderConnectionRefs,
+  filterByPiece,
+} from "../../connection-provider/src/connection-provider.js";
 import {
   startReactivePoll,
   type TriggerSpec as RunnerTriggerSpec,
@@ -902,4 +906,59 @@ export async function handleWebhookIngress(
   }
 
   return { status: 200, body: { fired: items.length, results } };
+}
+
+// --- connections (REFERENCES only, never secrets) -------------------------------
+// GET /connections?projectId=&piece=&format=json|context&budget=
+//   json    -> { connections: [{externalId,displayName,pieceName,type}], total }
+//   context -> { context, included, total, omitted }  (slot connections del CCDD)
+// Las referencias vienen del vault via listReferences (solo nombres). El secreto
+// NUNCA se sirve: listReferences no lo expone y renderConnectionRefs solo emite
+// {{connections.<externalId>}}.
+export interface ListConnectionsParams {
+  projectId?: string;
+  piece?: string;
+  format?: string;
+  budget?: number;
+}
+
+export function handleListConnections(params: ListConnectionsParams): HandlerResult {
+  const vault = getVault();
+  if (!vault) {
+    return { status: 503, body: { error: "vault not initialized" } };
+  }
+  const projectId = params.projectId || PROJECT_ID;
+  const refs = vault.listReferences(projectId).map((r) => ({
+    externalId: r.externalId,
+    displayName: r.displayName,
+    pieceName: r.pieceName,
+    type: r.type,
+  }));
+  const format = params.format ?? "json";
+
+  if (format === "context") {
+    const rendered = renderConnectionRefs(refs, {
+      maxTokens: params.budget ?? 1000,
+      pieceName: params.piece,
+    });
+    return {
+      status: 200,
+      body: {
+        context: rendered.context,
+        included: rendered.included,
+        total: rendered.total,
+        omitted: rendered.omitted,
+      },
+    };
+  }
+
+  // format === json (default)
+  const filtered = params.piece ? filterByPiece(refs, params.piece) : refs;
+  return {
+    status: 200,
+    body: {
+      connections: filtered,
+      total: filtered.length,
+    },
+  };
 }

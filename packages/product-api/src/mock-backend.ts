@@ -7,9 +7,18 @@ import { MemoryStore } from '../../backend-mock/src/store.js';
 import { MemoryFileStore } from '../../backend-mock/src/files.js';
 import { createServer } from '../../backend-mock/src/server.js';
 
+
 export interface MockBackend {
   server: Server;
   port: number;
+}
+
+// Module-level holder for the vault so handlers can read REFERENCES (names only,
+// never secrets) without a round-trip. Set by startMockBackend; read via getVault.
+let vaultInstance: Vault | null = null;
+
+export function getVault(): Vault | null {
+  return vaultInstance;
 }
 
 export const MOCK_PORT = Number(process.env.MOCK_PORT ?? '3997');
@@ -18,6 +27,7 @@ export const PROJECT_ID = process.env.PROJECT_ID ?? 'demo-project';
 
 export function startMockBackend(port: number = MOCK_PORT): Promise<MockBackend> {
   const vault = new Vault(process.env.VAULT_MASTER_KEY ?? 'dev-master-key-16chars');
+  vaultInstance = vault;
   const store = new MemoryStore();
   const files = new MemoryFileStore();
 
