@@ -1,10 +1,12 @@
 // Bundles the chosen representative community pieces into a common root.
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { buildPiece } from './build-piece.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AP_COMMUNITY = '/home/administrador/ap/packages/pieces/community';
+const AP_REPO = process.env.AP_REPO || path.join(os.homedir(), 'ap');
+const AP_COMMUNITY = path.join(AP_REPO, 'packages/pieces/community');
 const OUT = path.join(__dirname, 'community-pieces');
 
 const CHOSEN = ['json', 'flow-helper', 'slack', 'github', 'airtable'];

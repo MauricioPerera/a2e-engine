@@ -2,9 +2,11 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import esbuild from 'esbuild';
+import os from 'os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AP = '/home/administrador/ap/packages';
+const AP_REPO = process.env.AP_REPO || path.join(os.homedir(), 'ap');
+const AP = path.join(AP_REPO, 'packages');
 const PIECE_SRC = path.join(__dirname, 'custom-pieces-tick-cron/src/index.ts');
 
 const PIECE = '@automators/piece-tick-cron';

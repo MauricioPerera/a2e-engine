@@ -6,6 +6,7 @@
 // the successful inputs to the real okf-generator and writes full-catalog/.
 // A CATALOG-COVERAGE.md reports OK / failed + reasons.
 import { spawn } from 'child_process';
+import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -13,7 +14,8 @@ import { generateOkfCatalog } from '../okf-generator/src/okf-generator.ts';
 import type { PieceMetadataInput } from '../okf-generator/src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const COMMUNITY_ROOT = '/home/administrador/ap/packages/pieces/community';
+const AP_REPO = process.env.AP_REPO || path.join(os.homedir(), 'ap');
+const COMMUNITY_ROOT = path.join(AP_REPO, 'packages/pieces/community');
 const OUT = path.join(__dirname, 'full-catalog');
 const COVERAGE = path.join(__dirname, 'CATALOG-COVERAGE.md');
 const CHILD = path.join(__dirname, 'load-one-piece.mjs');

@@ -2,7 +2,6 @@
 // extract .metadata(), serialize to a JSON-safe PieceMetadataInput, print to stdout.
 // Runs as plain node (no .ts imports). Always exits 0 and prints one JSON line
 // so the parent can parse results uniformly; failures are reported in-band.
-import * as esbuild from '/home/administrador/ap/node_modules/esbuild/lib/main.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -10,7 +9,9 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 
-const AP = '/home/administrador/ap/packages';
+const AP_REPO = process.env.AP_REPO || path.join(os.homedir(), 'ap');
+const AP = path.join(AP_REPO, 'packages');
+const esbuild = require(path.join(AP_REPO, 'node_modules/esbuild/lib/main.js'));
 const engineAliases = {
   '@activepieces/shared': path.join(AP, 'core/shared/src'),
   '@activepieces/pieces-framework': path.join(AP, 'pieces/framework/src'),

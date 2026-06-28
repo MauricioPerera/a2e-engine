@@ -8,6 +8,34 @@
 
 ---
 
+## Setup / Build
+
+Requisitos: **bun** (AP fija `bun@1.3.3`), **node >= 20**, **git**, **npm**, ~6 GB libres y ~4 min para el `bun install` de Activepieces.
+
+La ruta del monorepo de Activepieces es parametrizable via la variable `AP_REPO` (default `$HOME/ap`); todos los build scripts (`build-engine.mjs`, `build-piece*.mjs`, `gen-*.ts`, `load-one-piece.mjs`) la leen de ahí. El tag de AP fijado es **`0.85.4`** (override con `AP_TAG`).
+
+Un solo paso:
+
+```bash
+bash scripts/setup.sh
+```
+
+Esto: clona Activepieces @ `0.85.4` en `$AP_REPO` si no existe · `bun install` en AP si falta `node_modules` · `npm install` en el producto (workspaces) si falta · build del engine -> `packages/engine-adapter/dist/engine.cjs` · build de las pieces demo (`piece-json`, `piece-echo-auth`, `piece-hook`). Al terminar imprime `SETUP OK` y la ruta del `engine.cjs`.
+
+Arrancar la API después:
+
+```bash
+cd packages/product-api && npm start        # http://localhost:8080
+```
+
+Smoke (verifica build + ejecución end-to-end):
+
+```bash
+cd packages/product-api && npm run smoke
+```
+
+---
+
 ## 1. Premisa A2E
 
 > El agente no escribe código. Escribe workflows que componen código ya validado (pieces). La corrección vive en las primitivas validadas y el runtime; la creatividad del agente, en la composición.

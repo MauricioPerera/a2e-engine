@@ -4,13 +4,17 @@
 //       package.json  (main -> index.cjs)
 //       index.cjs
 // Reuses the 7-alias + externals recipe from build-piece-echo.mjs.
-import * as esbuild from '/home/administrador/ap/node_modules/esbuild/lib/main.js';
+import { createRequire } from 'module';
+import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AP = '/home/administrador/ap/packages';
+const AP_REPO = process.env.AP_REPO || path.join(os.homedir(), 'ap');
+const AP = path.join(AP_REPO, 'packages');
+const require = createRequire(import.meta.url);
+const esbuild = require(path.join(AP_REPO, 'node_modules/esbuild/lib/main.js'));
 const PIECE_SRC = path.join(__dirname, 'custom-pieces-hook/src/index.ts');
 
 const PIECE = '@automators/piece-hook';
