@@ -29,6 +29,7 @@ import {
   handleAssembleAgentContext,
   handleAgentRun,
   handleDiscoverSources,
+  handleBuildSources,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
@@ -37,6 +38,7 @@ import {
   type AttestKnowledgeRequest,
   type AssembleAgentContextRequest,
   type DiscoverSourcesRequest,
+  type BuildSourcesRequest,
   type AgentRunRequest,
 } from "./handlers.js";
 import { parseApiKeys, authenticate, isWebhookIngress } from "./auth.js";
@@ -332,6 +334,20 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     return send(res, await handleDiscoverSources(parsed));
   }
+  // POST /sources/build { sourceDir, pieces:[names], outRoot?, catalogOut? } ->
+  //   { built, rejected, catalogPath }. Valida -> bundlea solo las validas ->
+  //   catalogo OKF aislado.
+  if (method === "POST" && pathname === "/sources/build") {
+    const raw = await readBody(req);
+    let parsed: BuildSourcesRequest;
+    try {
+      parsed = JSON.parse(raw) as BuildSourcesRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    return send(res, await handleBuildSources(parsed));
+  }
+
 
   // POST /agent/context { query, projectId? } -> contexto ensamblado + accounting + guardrail.
   if (method === "POST" && pathname === "/agent/context") {

@@ -63,6 +63,7 @@ import {
   type WebhookRegistration,
 } from "./trigger-registry.js";
 import { discoverSource, type DiscoverOptions } from "../../piece-source-manager/src/discover.js";
+import { buildSelectedPieces } from "../../piece-source-manager/src/build-source.js";
 import { runAgent } from "../../agent-runtime/src/orchestrator.js";
 import { callOllama } from "../../agent-runtime/src/ollama-provider.js";
 
@@ -1113,5 +1114,54 @@ export async function handleAgentRun(req: AgentRunRequest): Promise<HandlerResul
     return { status: 200, body: result };
   } catch (e) {
     return { status: 500, body: { error: `agent run failed: ${(e as Error).message}` } };
+  }
+}
+
+
+// POST /sources/build { sourceDir, pieces:[names], outRoot?, catalogOut? } ->
+//   { built, rejected, catalogPath }. Valida cada piece (validatePieceDir),
+//   bundlea solo las validas (build-piece.mjs) a un outRoot aislado y genera
+//   un catalogo OKF aislado. sourceDir puede ser ~/ap o un dir clonado por
+//   discover. CAVEAT: la extraccion de metadata + el bundle EJECUTAN codigo del
+//   piece in-process; para repos T2 NO confiables esto deberia ir sandboxeado.
+export interface BuildSourcesRequest {
+  sourceDir: string;
+  pieces: string[];
+  outRoot?: string;
+  catalogOut?: string;
+}
+
+export async function handleBuildSources(req: BuildSourcesRequest): Promise<HandlerResult> {
+  if (typeof req.sourceDir !== "string" || req.sourceDir.length === 0) {
+    return { status: 400, body: { error: "sourceDir (string) required" } };
+  }
+  if (!Array.isArray(req.pieces) || req.pieces.length === 0) {
+    return { status: 400, body: { error: "pieces (string[]) required" } };
+  }
+  const outRoot =
+    typeof req.outRoot === "string" && req.outRoot.length > 0
+      ? req.outRoot
+      : path.join(os.tmpdir(), `t2-build-${randomUUID()}`);
+  const catalogOut =
+    typeof req.catalogOut === "string" && req.catalogOut.length > 0
+      ? req.catalogOut
+      : path.join(os.tmpdir(), `t2-cat-${randomUUID()}`);
+  try {
+    const result = await buildSelectedPieces({
+      sourceDir: req.sourceDir,
+      pieceNames: req.pieces,
+      outRoot,
+      catalogOut,
+    });
+    return {
+      status: 200,
+      body: {
+        built: result.built,
+        rejected: result.rejected,
+        catalogPath: result.catalogPath,
+      },
+    };
+  } catch (e) {
+    return { status: 500, body: { error: (e as Error).message } };
   }
 }
