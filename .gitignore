@@ -49,3 +49,20 @@ catalog-summary.json
 # piece-validator: staging dir (if ever used)
 **/.piece-validator-stage/
 .piece-validator-stage/
+
+# T2 build sandbox (bwrap): outRoot/tmp dirs the sandbox or smoke scripts write.
+# Default outRoot is os.tmpdir() (outside repo), but if someone passes an
+# outRoot inside the repo, ignore the generated build/cat/evil temp dirs so no
+# untrusted bundle, metadata.json, or exfil artifact ever gets committed.
+**/t2-build-*/
+**/t2-cat-*/
+**/sbx-base-*/
+**/sbx-sandbox-*/
+**/sbx-evil-src-*/
+**/sbx-evil-out-*/
+**/sbxmeta-a-out-*/
+**/sbxmeta-a-cat-*/
+**/sbxmeta-evil-src-*/
+**/sbxmeta-evil-out-*/
+# host secret written by smoke-sandbox*.mjs during the malicious-piece test
+SECRET.txt

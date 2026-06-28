@@ -3,16 +3,22 @@
 // a un outRoot AISLADO, extrae su metadata y genera un catalogo OKF aislado a
 // catalogOut. Las que fallan validacion (errors) o no se encuentran -> rejected.
 //
-// CAVEAT (documentado): la extraccion de metadata EJECUTA el codigo del bundle
-// in-process (require del index.cjs + .metadata()), y el bundle (esbuild) corre
-// en el mismo proceso. Para repos T2 NO confiables esto deberia ir SANDBOXEADO
-// (contenedor sin red, limites). El MVP lo hace in-process; el sandbox de build
-// es endurecimiento posterior.
+// Doble modo de ejecucion del codigo de la piece:
+//  - Sin T2_SANDBOX (pieces confiables): el bundle (esbuild) y la extraccion de
+//    metadata (require del index.cjs + .metadata()) corren IN-PROCESS. Igual que
+//    antes. Solo para pieces confiables.
+//  - Con T2_SANDBOX=1 (repos T2 NO confiables): el bundle Y el require+.metadata()
+//    corren DENTRO de un sandbox bwrap (scripts/sandbox-build.sh modo "process" ->
+//    scripts/sandbox-process.mjs, red bloqueada, FS confinado). El sandbox escribe
+//    <pkgDir>/metadata.json. El host SOLO lee ese JSON (datos): NUNCA hace require
+//    del bundle no confiable. El catalogo OKF se genera desde ese metadata.json.
+//    Esto cierra el vector abierto anterior (require+.metadata() in-process).
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { discoverSource } from "./discover.js";
 import { validatePieceDir } from "../../piece-sdk/src/validate-from-dir.js";
 import { generateOkfCatalog } from "../../okf-generator/src/okf-generator.js";
@@ -54,6 +60,9 @@ export interface BuildSelectedResult {
 }
 
 // --- metadata extraction (espejo de load-one-piece.mjs, pero sobre el bundle) ---
+// USADO SOLO en modo in-process (sin T2_SANDBOX, pieces confiables). Con
+// T2_SANDBOX=1 la metadata se extrae DENTRO del sandbox (sandbox-process.mjs) y
+// el host lee metadata.json.
 
 function findPieceExport(mod: Record<string, unknown>): {
   metadata: () => Record<string, unknown>;
@@ -132,7 +141,9 @@ function normalizeAuth(auth: unknown): PieceAuthSummary | undefined {
 }
 
 // Require el bundle ya generado por build-piece.mjs y extrae .metadata().
-// EJECUTA codigo del piece in-process (ver CAVEAT arriba).
+// EJECUTA codigo del piece in-process. SOLO modo sin T2_SANDBOX (pieces confiables).
+// Con T2_SANDBOX=1 esta funcion NO se llama: la metadata viene de metadata.json
+// escrito por sandbox-process.mjs dentro del sandbox.
 function extractMetadataFromBundle(pkgDir: string): PieceMetadataInput {
   const indexCjs = path.join(pkgDir, "index.cjs");
   if (!existsSync(indexCjs)) throw new Error(`no index.cjs in bundle ${pkgDir}`);
@@ -162,6 +173,57 @@ function expandHome(p: string): string {
   if (p === "~") return os.homedir();
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+// Build una piece + extrae su metadata DENTRO de un sandbox bwrap (T2_SANDBOX=1):
+// delega a scripts/sandbox-build.sh en modo "process", que corre sandbox-process.mjs
+// (node + esbuild confinados, sin red, FS minimo). sandbox-process.mjs hace TANTO
+// el bundle (esbuild) COMO el require+.metadata() del bundle no confiable, todo
+// dentro del sandbox, y escribe <pkgDir>/metadata.json. El host SOLO lee ese JSON:
+// NUNCA hace require del bundle. Devuelve { name, version, pkgDir, indexCjs } y la
+// metadata leida del json (datos, no codigo).
+export async function buildPieceSandboxed(
+  pieceDir: string,
+  outRoot: string,
+): Promise<{ name: string; version: string; pkgDir: string; indexCjs: string; metadata: PieceMetadataInput }> {
+  const pkg = JSON.parse(readFileSync(path.join(pieceDir, "package.json"), "utf8")) as {
+    name: string; version: string;
+  };
+  const name = pkg.name;
+  const version = pkg.version;
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const script = path.join(scriptDir, "..", "scripts", "sandbox-build.sh");
+  let stdout = "";
+  try {
+    stdout = execFileSync(script, [pieceDir, outRoot, "process"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch (e) {
+    const err = e as { stderr?: Buffer | string; stdout?: Buffer | string; message: string };
+    const se = err.stderr ? (typeof err.stderr === "string" ? err.stderr : err.stderr.toString()) : "";
+    const so = err.stdout ? (typeof err.stdout === "string" ? err.stdout : err.stdout.toString()) : "";
+    throw new Error(
+      `sandbox-build(process) failed for ${pieceDir}: ${se || so || err.message}`,
+    );
+  }
+  const pkgDir = path.join(outRoot, "pieces", `${name}-${version}`, "node_modules", name);
+  const indexCjs = path.join(pkgDir, "index.cjs");
+  const metaPath = path.join(pkgDir, "metadata.json");
+  if (!existsSync(indexCjs)) {
+    throw new Error(
+      `sandbox-build(process) produced no index.cjs at ${indexCjs}; stdout=${stdout.slice(-400)}`,
+    );
+  }
+  if (!existsSync(metaPath)) {
+    throw new Error(
+      `sandbox-build(process) produced no metadata.json at ${metaPath}; stdout=${stdout.slice(-400)}`,
+    );
+  }
+  // El host lee el JSON (datos). NO hace require del bundle.
+  const metadata = JSON.parse(readFileSync(metaPath, "utf8")) as PieceMetadataInput;
+  return { name, version, pkgDir, indexCjs, metadata };
 }
 
 export async function buildSelectedPieces(
@@ -199,17 +261,30 @@ export async function buildSelectedPieces(
     valid.push({ name, absDir });
   }
 
-  // Bundlea cada piece valida al outRoot aislado y extrae su metadata.
+  // T2_SANDBOX=1 -> bundle + extraccion de metadata DENTRO del sandbox bwrap
+  // (sandbox-build.sh modo "process" -> sandbox-process.mjs). El host lee
+  // metadata.json; NUNCA hace require del bundle no confiable.
+  // Sin T2_SANDBOX -> build + extractMetadataFromBundle in-process (pieces confiables).
+  const useSandbox = process.env.T2_SANDBOX === "1";
   const inputs: PieceMetadataInput[] = [];
   for (const { name, absDir } of valid) {
     try {
-      const r = await buildPiece(absDir, outRoot);
-      const meta = extractMetadataFromBundle(r.pkgDir);
+      let meta: PieceMetadataInput;
+      let version: string;
+      if (useSandbox) {
+        const r = await buildPieceSandboxed(absDir, outRoot);
+        meta = r.metadata;
+        version = r.version;
+      } else {
+        const r = await buildPiece(absDir, outRoot);
+        meta = extractMetadataFromBundle(r.pkgDir);
+        version = r.version;
+      }
       inputs.push(meta);
       built.push({
         name,
         dir: path.relative(root, absDir).replace(/\\/g, "/"),
-        version: r.version,
+        version,
       });
     } catch (e) {
       rejected.push({
