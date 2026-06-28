@@ -35,11 +35,41 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { nextRun } from "./cron.ts";
 import type { CursorStore } from "./cursor-store.ts";
+import { randomUUID } from "node:crypto";
+import { appendRun, flowRunFromResult } from "../../run-logger/src/run-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
 const ENGINE_ADAPTER = path.resolve(__dirname, "../../engine-adapter");
+
+// Repo de run-history para el path reactivo de poll (opt-in via env). Si no se
+// setea, el loop NO registra runs (comportamiento previo). Best-effort.
+const RUNS_REPO = process.env.RUNS_REPO;
+
+// Registra un run de poll en el run-history. Fire-and-forget desde el loop:
+// traga todo internamente para no romper ni frenar la cadencia reactiva.
+async function recordPollRun(
+  repoDir: string,
+  source: string,
+  startedAt: string,
+  finishedAt: string,
+  result: any,
+): Promise<void> {
+  try {
+    const run = flowRunFromResult({
+      runId: randomUUID(),
+      source,
+      startedAt,
+      finishedAt,
+      verdict: result?.verdict ?? { status: "UNKNOWN" },
+      steps: result?.steps ?? {},
+    });
+    await appendRun(run, { repoDir });
+  } catch (e) {
+    console.error(`[run-history] poll record failed: ${(e as Error)?.message ?? e}`);
+  }
+}
 
 type EngineBundle = {
   triggerHookOperation: { execute: (op: unknown) => Promise<any> };
@@ -356,6 +386,7 @@ export function startReactivePoll(args: ContinuousPollArgs): ReactiveHandle {
 
       for (const item of sel.newItems) {
         const action = await buildBodyForItem(args.flowSteps, item);
+        const runStartedAt = new Date().toISOString();
         const result = await executeFlow({
           action,
           port: args.port,
@@ -363,6 +394,11 @@ export function startReactivePoll(args: ContinuousPollArgs): ReactiveHandle {
           projectId: args.projectId,
           platformId: args.platformId,
         });
+        // Run-history best-effort para el path reactivo de poll. Sin await
+        // (fire-and-forget) para no alterar la cadencia del loop.
+        if (RUNS_REPO) {
+          void recordPollRun(RUNS_REPO, "poll", runStartedAt, new Date().toISOString(), result);
+        }
         state.fired.push({
           tick,
           item,

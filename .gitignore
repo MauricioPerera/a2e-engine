@@ -9,3 +9,8 @@ node_modules/
 **/.cursors/
 *.log
 .DS_Store
+
+# run-history artifacts (OKF+git logger) and temp verify runs
+**/.run-history/
+.run-history/
+**/verify-runs-*/

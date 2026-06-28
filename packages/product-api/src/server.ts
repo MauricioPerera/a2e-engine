@@ -12,6 +12,8 @@ import {
   handleGetWebhookTrigger,
   handleDeleteWebhookTrigger,
   handleWebhookIngress,
+  handleListRuns,
+  handleGetRun,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
@@ -137,7 +139,25 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     );
   }
 
-  send(res, { status: 404, body: { error: `no route for ${method} ${pathname}` } });
+  // --- run-history (OKF + git por run) -----------------------------------
+  // GET /runs            -> { dates, runs } (recientes; o ?date=YYYY-MM-DD)
+  // GET /runs/:date/:runId -> markdown del run
+  if (method === "GET" && pathname === "/runs") {
+    const date = url.searchParams.get("date") ?? undefined;
+    return send(res, await handleListRuns(date));
+  }
+
+  if (method === "GET" && pathname.startsWith("/runs/")) {
+    const rest = decodeURIComponent(pathname.slice("/runs/".length));
+    const parts = rest.split("/");
+    if (parts.length < 2 || !parts[0] || !parts[1]) {
+      return send(res, { status: 400, body: { error: "expected /runs/:date/:runId" } });
+    }
+    const [date, runId] = parts;
+    return send(res, await handleGetRun(date, runId));
+  }
+
+    send(res, { status: 404, body: { error: `no route for ${method} ${pathname}` } });
 }
 
 export function createProductServer(): Server {

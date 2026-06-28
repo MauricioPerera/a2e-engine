@@ -2,6 +2,7 @@
 // returns { status, body } so the server stays a thin dispatcher.
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { FileCursorStore } from "../../trigger-runtime/src/cursor-store.js";
 import {
@@ -12,6 +13,12 @@ import {
 import { validateActionInput } from "../../flow-builder/src/validate-input.js";
 import { generateOkfCatalog } from "../../okf-generator/src/okf-generator.js";
 import type { OkfFile } from "../../okf-generator/src/types.js";
+import {
+  appendRun,
+  flowRunFromResult,
+  listRuns,
+  getRun,
+} from "../../run-logger/src/run-store.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID } from "./mock-backend.js";
 import {
@@ -38,6 +45,39 @@ const require = createRequire(import.meta.url);
 const CURSOR_DIR = path.resolve(process.cwd(), ".cursors");
 const pollingCursorStore = new FileCursorStore(CURSOR_DIR);
 
+// Repo de run-history (OKF + git por run). Configurable vía env; default bajo
+// ~/product/.run-history. Best-effort: SIEMPRE se registra tras cada executeFlow
+// (manual/webhook), pero un fallo del run-history NUNCA rompe la respuesta del
+// endpoint (recordRunBestEffort traga todo).
+const RUNS_REPO = process.env.RUNS_REPO ?? path.join(os.homedir(), "product/.run-history");
+
+// Registra un run en el run-history a partir del resultado del engine. Best-effort:
+// captura cualquier error internamente para no propagarlo al caller. `await` para
+// que el smoke vea los commits de forma determinista (el coste es ~un commit/run).
+async function recordRunBestEffort(args: {
+  source: string;
+  startedAt: string;
+  finishedAt: string;
+  verdict: { status: string; failedStep?: string };
+  steps: Record<string, { status: string; output: unknown; errorMessage?: string }>;
+  error?: { name?: string; message?: string; stack?: string };
+}): Promise<void> {
+  try {
+    const run = flowRunFromResult({
+      runId: randomUUID(),
+      source: args.source,
+      startedAt: args.startedAt,
+      finishedAt: args.finishedAt,
+      verdict: args.verdict,
+      steps: args.steps,
+      ...(args.error ? { error: args.error } : {}),
+    });
+    await appendRun(run, { repoDir: RUNS_REPO });
+  } catch (e) {
+    console.error(`[run-history] record failed: ${(e as Error)?.message ?? e}`);
+  }
+}
+
 
 const { executeFlow } = require("../../engine-adapter/src/execute-flow.cjs") as {
   executeFlow: (args: {
@@ -48,7 +88,7 @@ const { executeFlow } = require("../../engine-adapter/src/execute-flow.cjs") as 
     platformId?: string;
     stepNames?: string[];
   }) => Promise<{
-    verdict: unknown;
+    verdict: { status: string; failedStep?: string };
     steps: Record<string, { status: string; output: unknown; errorMessage?: string }>;
   }>;
 };
@@ -141,6 +181,7 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
     return { status: 400, body: { error: `invalid request: ${(e as Error).message}` } };
   }
 
+  const startedAt = new Date().toISOString();
   try {
     const result = await executeFlow({
       action,
@@ -148,9 +189,14 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
       engineToken: ENGINE_TOKEN,
       projectId: PROJECT_ID,
     });
-    const stepNames = Object.keys(result.steps ?? {});
+    const finishedAt = new Date().toISOString();
+    const verdict = result.verdict ?? { status: "UNKNOWN" };
+    const stepsMap = result.steps ?? {};
+    // Run-history best-effort: NO rompe la respuesta si falla.
+    await recordRunBestEffort({ source: "manual", startedAt, finishedAt, verdict, steps: stepsMap });
+    const stepNames = Object.keys(stepsMap);
     const last = stepNames[stepNames.length - 1];
-    const step = last ? result.steps[last] : undefined;
+    const step = last ? stepsMap[last] : undefined;
     return {
       status: 200,
       body: {
@@ -160,8 +206,38 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
       },
     };
   } catch (e) {
+    const finishedAt = new Date().toISOString();
+    // Registra el run FAILED aunque executeFlow haya lanzado (ej. piece inexistente).
+    await recordRunBestEffort({
+      source: "manual",
+      startedAt,
+      finishedAt,
+      verdict: { status: "FAILED" },
+      steps: {},
+      error: {
+        name: (e as Error)?.name,
+        message: (e as Error)?.message,
+        stack: (e as Error)?.stack,
+      },
+    });
     return { status: 500, body: { error: `execution failed: ${(e as Error).message}` } };
   }
+}
+
+// --- run-history endpoints ------------------------------------------------
+
+// GET /runs -> { dates: [...], runs: [...] } (fechas disponibles + runs recientes
+// o, con ?date=YYYY-MM-DD, los runs de ese día).
+export async function handleListRuns(date?: string): Promise<HandlerResult> {
+  const { dates, runs } = await listRuns({ repoDir: RUNS_REPO, date });
+  return { status: 200, body: { dates, runs } };
+}
+
+// GET /runs/:date/:runId -> el markdown del run, o 404.
+export async function handleGetRun(date: string, runId: string): Promise<HandlerResult> {
+  const md = await getRun({ repoDir: RUNS_REPO, date, runId });
+  if (md == null) return { status: 404, body: { error: `run not found: ${date}/${runId}` } };
+  return { status: 200, body: md };
 }
 
 // --- reactive triggers -----------------------------------------------------
@@ -471,16 +547,45 @@ export async function handleWebhookIngress(
       input: templateItemInput(s.input, item),
     }));
     const action = buildFlowFromRequest({ steps } as ExecuteRequest, new Date().toISOString());
-    const result = await executeFlow({
-      action,
-      port: String(MOCK_PORT),
-      engineToken: ENGINE_TOKEN,
-      projectId: PROJECT_ID,
-      platformId: "demo-platform",
-    });
-    const stepNames = Object.keys(result.steps ?? {});
+    const startedAt = new Date().toISOString();
+    let result: {
+      verdict: { status: string; failedStep?: string };
+      steps: Record<string, { status: string; output: unknown; errorMessage?: string }>;
+    };
+    try {
+      result = await executeFlow({
+        action,
+        port: String(MOCK_PORT),
+        engineToken: ENGINE_TOKEN,
+        projectId: PROJECT_ID,
+        platformId: "demo-platform",
+      });
+    } catch (e) {
+      const finishedAt = new Date().toISOString();
+      // Run-history best-effort para el path reactivo de webhooks.
+      await recordRunBestEffort({
+        source: "webhook",
+        startedAt,
+        finishedAt,
+        verdict: { status: "FAILED" },
+        steps: {},
+        error: { name: (e as Error)?.name, message: (e as Error)?.message, stack: (e as Error)?.stack },
+      });
+      results.push({
+        status: "FAILED",
+        output: null,
+        errorMessage: (e as Error).message,
+      });
+      continue;
+    }
+    const finishedAt = new Date().toISOString();
+    const verdict = result.verdict ?? { status: "UNKNOWN" };
+    const stepsMap = result.steps ?? {};
+    // Run-history best-effort para el path reactivo de webhooks.
+    await recordRunBestEffort({ source: "webhook", startedAt, finishedAt, verdict, steps: stepsMap });
+    const stepNames = Object.keys(stepsMap);
     const last = stepNames[stepNames.length - 1];
-    const step = last ? result.steps[last] : undefined;
+    const step = last ? stepsMap[last] : undefined;
     results.push({
       status: step?.status ?? String(result.verdict),
       output: step?.output ?? null,
