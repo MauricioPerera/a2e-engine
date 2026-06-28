@@ -4,6 +4,9 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { retrieve, type PieceSummary } from "../../okf-retriever/src/okf-retriever.js";
 import { FileCursorStore } from "../../trigger-runtime/src/cursor-store.js";
 import {
   buildFlowFromRequest,
@@ -218,6 +221,49 @@ export function handlePiece(name: string): HandlerResult {
   const file = catalogByPath.get(`${name}/index.md`);
   if (!file) return { status: 404, body: { error: `piece not found: ${name}` } };
   return { status: 200, body: file.content };
+}
+
+// --- okf_catalog provider: retriever estructural acotado a budget ---------------------
+// Carga perezosa (cache en modulo) de catalog-summary.json: array de PieceSummary
+// construido por okf-retriever/build-catalog-summary.mjs desde la metadata real del
+// catalogo (710 pieces). Ruta via env CATALOG_SUMMARY; default al summary de
+// okf-retriever (resuelto relativo a este archivo). Si no existe -> 503 con mensaje
+// claro para que el agente sepa que falta el build (no un 500 silencioso).
+const HANDLERS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_CATALOG_SUMMARY = path.resolve(HANDLERS_DIR, "../../okf-retriever/catalog-summary.json");
+let catalogSummaryCache: PieceSummary[] | null | undefined = undefined; // undefined = no intentado aun
+function loadCatalogSummary(): PieceSummary[] | null {
+  if (catalogSummaryCache !== undefined) return catalogSummaryCache;
+  const p = process.env.CATALOG_SUMMARY ?? DEFAULT_CATALOG_SUMMARY;
+  try {
+    if (!existsSync(p)) { catalogSummaryCache = null; return null; }
+    catalogSummaryCache = JSON.parse(readFileSync(p, "utf8")) as PieceSummary[];
+    return catalogSummaryCache;
+  } catch (e) {
+    console.error(`[catalog-retrieve] failed to load ${p}: ${(e as Error).message}`);
+    catalogSummaryCache = null;
+    return null;
+  }
+}
+// GET /catalog/retrieve?q=<query>&budget=<maxTokens>&mode=index|detail ->
+//   { context, included, estimatedTokens, total, omitted }  (subconjunto del catalogo
+//   que cabe en el budget de tokens). Resuelve "el catalogo no cabe en el contexto".
+export function handleCatalogRetrieve(
+  query: string,
+  budget: number | undefined,
+  mode: string | undefined,
+): HandlerResult {
+  const summary = loadCatalogSummary();
+  if (!summary) {
+    return {
+      status: 503,
+      body: { error: "catalog-summary.json not built. Run: node packages/okf-retriever/build-catalog-summary.mjs" },
+    };
+  }
+  const maxTokens = budget && budget > 0 ? budget : 4000;
+  const m = mode === "detail" ? "detail" : "index";
+  const result = retrieve(summary, query ?? "", { maxTokens, mode: m });
+  return { status: 200, body: result };
 }
 
 // Ejecuta un action YA CONSTRUIDO contra el engine, registra el run en el

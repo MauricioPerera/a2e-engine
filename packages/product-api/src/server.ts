@@ -3,6 +3,7 @@ import { createServer as createHttpServer, type Server, type IncomingMessage, ty
 import type { ExecuteRequest } from "../../flow-builder/src/flow-builder.js";
 import {
   handleCatalog,
+  handleCatalogRetrieve,
   handlePiece,
   handleExecute,
   handleCreateTrigger,
@@ -55,6 +56,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const method = req.method ?? "GET";
 
   if (method === "GET" && pathname === "/catalog") return send(res, handleCatalog());
+
+  // GET /catalog/retrieve?q=<query>&budget=<maxTokens>&mode=index|detail ->
+  //   subconjunto del catalogo acotado al budget (provider okf_catalog).
+  if (method === "GET" && pathname === "/catalog/retrieve") {
+    const q = url.searchParams.get("q") ?? "";
+    const budgetRaw = url.searchParams.get("budget");
+    const budget = budgetRaw ? Number(budgetRaw) : undefined;
+    const mode = url.searchParams.get("mode") ?? undefined;
+    return send(res, handleCatalogRetrieve(q, budget, mode));
+  }
 
   if (method === "GET" && pathname.startsWith("/pieces/")) {
     const name = decodeURIComponent(pathname.slice("/pieces/".length));

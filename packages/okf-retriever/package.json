@@ -1,0 +1,16 @@
+{
+  "name": "okf-retriever",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "description": "Retriever estructural (sin RAG) del catalogo OKF: selecciona pieces relevantes por coincidencia de terms y renderiza contexto compacto dentro de un budget de tokens.",
+  "main": "src/okf-retriever.ts",
+  "scripts": {
+    "test": "tsx --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}
