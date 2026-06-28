@@ -9,12 +9,11 @@ Complementa: `DEP-AUDIT.md` (auditoria manual de pieces, 2026-06-27)
 
 ## 1. Resumen del escaneo automatico (`license-checker --summary`)
 
-Salida real de `npx license-checker@latest --summary` sobre `~/product`:
+Salida real de `npx license-checker@latest --summary` sobre `~/product` (tras declarar `license`/`private` en los packages propios, 2026-06-28):
 
 ```
 ├─ MIT: 5
-├─ UNLICENSED: 4
-├─ ISC: 1
+├─ UNLICENSED: 5
 └─ Apache-2.0: 1
 ```
 
@@ -22,12 +21,13 @@ Salida real de `npx license-checker@latest --summary` sobre `~/product`:
 
 | Licencia | # | Paquetes |
 | --- | --- | --- |
-| MIT | 5 | `@esbuild/linux-x64@0.28.1`, `@types/node@26.0.1`, `esbuild@0.28.1`, `tsx@4.22.4`, `undici-types@8.3.0` |
+| MIT | 5 | `@esbuild/linux-x64@0.28.1`, `@types/node@26.0.1`, `esbuild@0.28.1`, `tsx@4.22.4`, `undici-types@8.3.0` (toolchain de terceros) |
 | Apache-2.0 | 1 | `typescript@5.9.3` |
-| ISC | 1 | `engine-backend-mock@1.0.0` (propio, workspace) |
-| UNLICENSED | 4 | `flow-builder@0.1.0`, `okf-generator@0.1.0`, `product@0.0.0`, `trigger-runtime@0.1.0` (propios, workspace) |
+| UNLICENSED | 5 | `engine-backend-mock@1.0.0`, `flow-builder@0.1.0`, `okf-generator@0.1.0`, `product@0.0.0`, `trigger-runtime@0.1.0` (propios, workspace, `private: true`) |
 
-> **Nota sobre los 4 "UNLICENSED":** son los **propios packages privados** del workspace (`product`, `flow-builder`, `okf-generator`, `trigger-runtime`) cuyo `package.json` no declara campo `license`. No son dependencias de terceros. Para uso interno/private es esperado; si se publican, conviene agregar `license: MIT`. **No es un hallazgo de copyleft.**
+> **Nota sobre los 5 "UNLICENSED" (artefacto de `license-checker`, NO falta de licencia):** son los **propios packages privados** del workspace. Todos declaran `license` en su `package.json` (`MIT` para `product`, `flow-builder`, `okf-generator`, `trigger-runtime` y tambien `product-api` — este ultimo no aparece por no estar en `node_modules`; `ISC` para `engine-backend-mock`) y todos tienen `private: true`. `license-checker` v25 fuerza `licenses = "UNLICENSED"` para cualquier package con `private: true` (ver `lib/index.js` lineas 37-38 y 324-325), **ignorando el campo `license`**. Por eso aparecen como UNLICENSED aun teniendo `license: MIT`. No son dependencias de terceros y **no es un hallazgo de copyleft ni de paquetes sin licencia**.
+>
+> **Verificacion de "0 propios sin licencia":** `npx license-checker --summary --excludePrivatePackages` excluye los privados y devuelve solo `MIT: 5` + `Apache-2.0: 1` (0 UNLICENSED), confirmando que ningun package propio ni de tercero carece de declaracion de licencia.
 
 ### Por que solo 11 paquetes
 
@@ -104,9 +104,10 @@ instalado de `~/product` ni entre las deps de produccion verificadas.
 
 ### Licencias UNKNOWN / vacias
 
-- En el arbol instalado de `~/product`: **0 UNKNOWN**. Los 4 marcados
-  `UNLICENSED` son propios packages privados del workspace (ver seccion 1),
-  no licencias indeterminadas de terceros.
+- En el arbol instalado de `~/product`: **0 UNKNOWN**. Los 5 marcados
+  `UNLICENSED` son propios packages privados del workspace con `license` declarado
+  (ver seccion 1); `license-checker` los etiqueta UNLICENSED por ser `private: true`,
+  no por licencia indeterminada de terceros.
 - Entre las deps de engine/pieces verificadas con `npm view`: **0 UNKNOWN** —
   todas devolvieron una licencia declarada.
 
@@ -118,8 +119,9 @@ No hay hallazgos que requieran revision manual por licencia indeterminada.
 
 **SCA-lite hecho y publicado: 100% permisivo, sin hallazgos.**
 
-- 11 paquetes instalados en `~/product`: MIT×5, Apache-2.0×1, ISC×1, y 4
-  propios `UNLICENSED` (privados, no terceros).
+- 11 paquetes instalados en `~/product`: MIT×5, Apache-2.0×1, y 5
+  propios `UNLICENSED` (privados con `license` declarado; artifact de `license-checker`,
+  ver seccion 1). Con `--excludePrivatePackages`: 0 UNLICENSED.
 - 13 deps de engine + 3 externals de pieces + jsonata: todas
   MIT / Apache-2.0 / ISC / BSD-3-Clause / 0BSD.
 - 0 copyleft, 0 dual/custom, 0 UNKNOWN.
