@@ -1,0 +1,16 @@
+{
+  "name": "context-assembler",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Pure-logic runtime context assembler + guardrails (L3 CCDD contract).",
+  "scripts": {
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}

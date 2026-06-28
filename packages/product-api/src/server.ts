@@ -24,12 +24,14 @@ import {
   handleGetKnowledge,
   handleAttestKnowledge,
   handleListConnections,
+  handleAssembleAgentContext,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
   type CreateWorkflowRequest,
   type CreateKnowledgeRequest,
   type AttestKnowledgeRequest,
+  type AssembleAgentContextRequest,
 } from "./handlers.js";
 
 function send(res: ServerResponse, result: HandlerResult): void {
@@ -264,6 +266,21 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       }
       return send(res, await handleAttestKnowledge(id, parsed));
     }
+  }
+
+  // POST /agent/context { query, projectId? } -> contexto ensamblado + accounting + guardrail.
+  if (method === "POST" && pathname === "/agent/context") {
+    const raw = await readBody(req);
+    let parsed: AssembleAgentContextRequest;
+    try {
+      parsed = JSON.parse(raw) as AssembleAgentContextRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    if (typeof parsed.query !== "string") {
+      return send(res, { status: 400, body: { error: "query (string) required" } });
+    }
+    return send(res, handleAssembleAgentContext(parsed));
   }
 
     send(res, { status: 404, body: { error: `no route for ${method} ${pathname}` } });

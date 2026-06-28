@@ -39,6 +39,7 @@ import {
 import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID, getVault } from "./mock-backend.js";
+import { assembleAgentContext } from "./assemble-agent-context.js";
 import {
   renderConnectionRefs,
   filterByPiece,
@@ -961,4 +962,21 @@ export function handleListConnections(params: ListConnectionsParams): HandlerRes
       total: filtered.length,
     },
   };
+}
+
+// --- agent context (L3 CCDD: runtime assembly contrato -> contexto acotado) -----
+// POST /agent/context { query, projectId? } -> ensambla el contexto del agente
+// respetando slots firmados + budget + guardrails (ver assemble-agent-context.ts).
+export interface AssembleAgentContextRequest {
+  query: string;
+  projectId?: string;
+}
+
+export function handleAssembleAgentContext(req: AssembleAgentContextRequest): HandlerResult {
+  try {
+    const result = assembleAgentContext({ query: req.query, projectId: req.projectId });
+    return { status: 200, body: result };
+  } catch (e) {
+    return { status: 500, body: { error: (e as Error).message } };
+  }
 }
