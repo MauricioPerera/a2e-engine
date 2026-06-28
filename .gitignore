@@ -32,3 +32,13 @@ catalog-summary.json
 .data/
 **/vault.json
 **/store.json
+
+# SQLite durable backend artifacts — NEVER commit
+*.db
+**/*.db
+**/*.db-journal
+*.db-journal
+**/*.db-wal
+*.db-wal
+**/*.db-shm
+*.db-shm
