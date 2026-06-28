@@ -26,3 +26,9 @@ node_modules/
 # catalog-summary.json is a GENERATED artifact (710 pieces, rebuilt by build-catalog-summary.mjs from full-catalog)
 **/catalog-summary.json
 catalog-summary.json
+
+# durable file-backed backend data artifacts — NEVER commit
+**/.data/
+.data/
+**/vault.json
+**/store.json

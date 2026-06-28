@@ -41,8 +41,10 @@ export interface EncryptedRecord {
 
 export class Vault {
   readonly audit: AuditEntry[] = [];
-  private records: Map<string, EncryptedRecord> = new Map();
-  private readonly key: Buffer;
+  // Visible to subclasses (DurableVault) so they can load/persist the same
+  // ciphertext store without re-implementing the crypto. Behavior unchanged.
+  protected records: Map<string, EncryptedRecord> = new Map();
+  protected readonly key: Buffer;
 
   constructor(masterKey: string) {
     if (!masterKey || masterKey.length < 16) {
@@ -117,11 +119,11 @@ export class Vault {
     return results;
   }
 
-  private recordKey(projectId: string, externalId: string): string {
+  protected recordKey(projectId: string, externalId: string): string {
     return `${projectId}::${externalId}`;
   }
 
-  private encrypt(value: AppConnectionValue): string {
+  protected encrypt(value: AppConnectionValue): string {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key, iv);
     const data = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
@@ -129,7 +131,7 @@ export class Vault {
     return `${iv.toString('hex')}:${authTag.toString('hex')}:${data.toString('hex')}`;
   }
 
-  private decrypt(ciphertext: string): AppConnectionValue {
+  protected decrypt(ciphertext: string): AppConnectionValue {
     const [ivHex, authTagHex, dataHex] = ciphertext.split(':');
     const decipher = createDecipheriv('aes-256-gcm', this.key, Buffer.from(ivHex, 'hex'));
     decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));

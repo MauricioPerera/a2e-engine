@@ -2,13 +2,15 @@
  * MemoryStore: in-memory key/value store backed by a Map.
  *
  * The key is treated as opaque: it is used as-is as the Map key and not
- * interpreted or transformed. The value is arbitrary JSON-shaped data; it
- * is not validated. `delete` is idempotent (no-op if the key is absent).
+ * interpreted or transformed. The value is arbitrary JSON-shaped data; it is
+ * not validated. `delete` is idempotent (no-op if the key is absent).
  */
 export type StoreEntry = { key: string; value: unknown };
 
 export class MemoryStore {
-  private readonly entries = new Map<string, unknown>();
+  // Visible to subclasses (DurableStore) so they can load/persist the same
+  // entries without duplicating the Map. Behavior unchanged.
+  protected readonly entries = new Map<string, unknown>();
 
   /** Store/replace a value and return the resulting entry. */
   put(key: string, value: unknown): StoreEntry {
