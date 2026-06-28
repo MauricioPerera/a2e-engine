@@ -42,3 +42,6 @@ catalog-summary.json
 *.db-wal
 **/*.db-shm
 *.db-shm
+
+# piece-source-manager: custom workdir for discover() clones (default is os.tmpdir(), outside repo)
+**/.psm-workdir/

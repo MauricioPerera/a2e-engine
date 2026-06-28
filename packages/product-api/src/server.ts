@@ -25,6 +25,7 @@ import {
   handleAttestKnowledge,
   handleListConnections,
   handleAssembleAgentContext,
+  handleDiscoverSources,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
@@ -32,6 +33,7 @@ import {
   type CreateKnowledgeRequest,
   type AttestKnowledgeRequest,
   type AssembleAgentContextRequest,
+  type DiscoverSourcesRequest,
 } from "./handlers.js";
 import { parseApiKeys, authenticate, isWebhookIngress } from "./auth.js";
 
@@ -287,6 +289,20 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       }
       return send(res, await handleAttestKnowledge(id, parsed));
     }
+  }
+
+  // POST /sources/discover { source, ref? } -> { sourceId, pieces, total, warnings }
+  // Discovery SEGURO: clona (git) / lee (local) + parsea package.json + src/index.ts.
+  // NO ejecuta codigo de las pieces. dir es relativo al root del source.
+  if (method === "POST" && pathname === "/sources/discover") {
+    const raw = await readBody(req);
+    let parsed: DiscoverSourcesRequest;
+    try {
+      parsed = JSON.parse(raw) as DiscoverSourcesRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    return send(res, await handleDiscoverSources(parsed));
   }
 
   // POST /agent/context { query, projectId? } -> contexto ensamblado + accounting + guardrail.

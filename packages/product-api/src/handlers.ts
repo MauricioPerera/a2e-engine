@@ -60,6 +60,7 @@ import {
   type WebhookStepSpec,
   type WebhookRegistration,
 } from "./trigger-registry.js";
+import { discoverSource, type DiscoverOptions } from "../../piece-source-manager/src/discover.js";
 
 const require = createRequire(import.meta.url);
 // Persisted cursor store for POLLING triggers: keeps `seen` on disk so the
@@ -976,6 +977,45 @@ export function handleAssembleAgentContext(req: AssembleAgentContextRequest): Ha
   try {
     const result = assembleAgentContext({ query: req.query, projectId: req.projectId });
     return { status: 200, body: result };
+  } catch (e) {
+    return { status: 500, body: { error: (e as Error).message } };
+  }
+}
+
+// --- piece source discovery (fase SEGURA: solo clona/lee + parsea, 0 exec) ------
+// POST /sources/discover { source, ref? } -> { sourceId, pieces, total, warnings }
+// Lista pieces de un repo git (clone --depth 1) o ruta local SIN ejecutar codigo
+// de las pieces. dir es relativo al root del source (no expone rutas absolutas).
+export interface DiscoverSourcesRequest {
+  source: string;
+  ref?: string;
+  workdir?: string;
+}
+
+export async function handleDiscoverSources(req: DiscoverSourcesRequest): Promise<HandlerResult> {
+  if (typeof req.source !== "string" || req.source.length === 0) {
+    return { status: 400, body: { error: "source (string) required" } };
+  }
+  const opts: DiscoverOptions = { source: req.source };
+  if (typeof req.ref === "string" && req.ref.length > 0) opts.ref = req.ref;
+  if (typeof req.workdir === "string" && req.workdir.length > 0) opts.workdir = req.workdir;
+  try {
+    const result = await discoverSource(opts);
+    return {
+      status: 200,
+      body: {
+        sourceId: result.sourceId,
+        pieces: result.pieces.map((p) => ({
+          name: p.name,
+          displayName: p.displayName,
+          description: p.description,
+          ...(p.auth ? { auth: p.auth } : {}),
+          dir: p.dir,
+        })),
+        total: result.total,
+        warnings: result.warnings,
+      },
+    };
   } catch (e) {
     return { status: 500, body: { error: (e as Error).message } };
   }

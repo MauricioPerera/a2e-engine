@@ -1,0 +1,16 @@
+{
+  "name": "piece-source-manager",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "description": "Discovery (fase segura): lista pieces de un repo git o ruta local SIN ejecutar ni bundlear codigo — solo clona/lee + parsea.",
+  "main": "src/discover.ts",
+  "scripts": {
+    "smoke": "tsx smoke-discover.mjs"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}
