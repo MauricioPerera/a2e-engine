@@ -242,6 +242,59 @@ export const tools: ToolDefinition[] = [
       return apiCall({ method: "GET", path: "/runs" });
     }),
   },
+  {
+    name: "retrieve_pieces",
+    description:
+      "Level-1 hierarchical retrieval: the relevant pieces for a natural-language query, " +
+      "each with its action-NAME hints (no props), bounded by a token budget. Use this FIRST " +
+      "to find candidate pieces, then retrieve_actions to drill into one. GET /catalog/pieces.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language description of what you want to do." },
+        budget: {
+          type: "number",
+          description: "Max tokens for the level-1 context. Defaults to 3000 if omitted.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    handler: safe(async (args) => {
+      return apiCall({
+        method: "GET",
+        path: "/catalog/pieces",
+        query: { q: str(args, "query"), budget: optNum(args, "budget") },
+      });
+    }),
+  },
+  {
+    name: "retrieve_actions",
+    description:
+      "Level-2 hierarchical retrieval: the actions of ONE piece (WITH input props), filtered " +
+      "by an optional query and bounded by a token budget. Call this after retrieve_pieces to " +
+      "drill into a specific piece before composing a workflow step. GET /catalog/pieces/:name/actions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        piece: { type: "string", description: "Piece name, e.g. '@activepieces/piece-slack'." },
+        query: { type: "string", description: "Optional filter to select matching actions of the piece." },
+        budget: {
+          type: "number",
+          description: "Max tokens for the level-2 context. Defaults to 2000 if omitted.",
+        },
+      },
+      required: ["piece"],
+      additionalProperties: false,
+    },
+    handler: safe(async (args) => {
+      return apiCall({
+        method: "GET",
+        path: `/catalog/pieces/${encodeURIComponent(str(args, "piece"))}/actions`,
+        query: { q: optStr(args, "query"), budget: optNum(args, "budget") },
+      });
+    }),
+  },
 ];
 
 // Map name -> handler, for the CallToolRequest handler and for direct

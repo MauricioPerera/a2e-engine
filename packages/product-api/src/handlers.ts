@@ -4,9 +4,11 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { retrieve, type PieceSummary } from "../../okf-retriever/src/okf-retriever.js";
+import { retrievePieces, retrieveActions, type ActionDetail } from "../../okf-retriever/src/two-level.js";
+import { parseActionMd } from "./action-md-parser.js";
 import { FileCursorStore } from "../../trigger-runtime/src/cursor-store.js";
 import {
   buildFlowFromRequest,
@@ -271,6 +273,70 @@ export function handleCatalogRetrieve(
   const maxTokens = budget && budget > 0 ? budget : 4000;
   const m = mode === "detail" ? "detail" : "index";
   const result = retrieve(summary, query ?? "", { maxTokens, mode: m });
+  return { status: 200, body: result };
+}
+
+// --- retriever jerárquico de 2 niveles ---------------------------------------
+// NIVEL 1: pieces relevantes + NOMBRES de sus actions (hints, sin props),
+// acotado a su propio budget. Reusa retrievePieces del two-level.
+// GET /catalog/pieces?q=&budget= -> { context, included, total, omitted, estimatedTokens }.
+export function handleCatalogPieces(query: string, budget: number | undefined): HandlerResult {
+  const summary = loadCatalogSummary();
+  if (!summary) {
+    return {
+      status: 503,
+      body: { error: "catalog-summary.json not built. Run: node packages/okf-retriever/build-catalog-summary.mjs" },
+    };
+  }
+  const maxTokens = budget && budget > 0 ? budget : 3000;
+  const result = retrievePieces(summary, query ?? "", { maxTokens });
+  return { status: 200, body: result };
+}
+
+// full-catalog: docs action.md por piece. Ruta via env FULL_CATALOG_DIR; default
+// al full-catalog de engine-adapter (resuelto relativo a este archivo).
+const DEFAULT_FULL_CATALOG = path.resolve(HANDLERS_DIR, "../../engine-adapter/full-catalog");
+function fullCatalogDir(): string {
+  return process.env.FULL_CATALOG_DIR ?? DEFAULT_FULL_CATALOG;
+}
+
+// Cache por piece name -> ActionDetail[] (parsear los action.md de UNA piece es
+// barato, pero no tiene sentido repetirlo por request). null = piece ausente.
+const pieceActionsCache = new Map<string, ActionDetail[] | null>();
+function loadPieceActions(pieceName: string): ActionDetail[] | null {
+  if (pieceActionsCache.has(pieceName)) return pieceActionsCache.get(pieceName) ?? null;
+  const dir = path.join(fullCatalogDir(), pieceName, "actions");
+  let actions: ActionDetail[] | null = null;
+  try {
+    if (!existsSync(dir)) {
+      pieceActionsCache.set(pieceName, null);
+      return null;
+    }
+    const files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
+    actions = files.map((f) => parseActionMd(readFileSync(path.join(dir, f), "utf8"), f));
+  } catch (e) {
+    console.error(`[catalog-pieces] failed to load actions for ${pieceName}: ${(e as Error).message}`);
+    actions = null;
+  }
+  pieceActionsCache.set(pieceName, actions);
+  return actions;
+}
+
+// NIVEL 2: las actions DE UNA piece (con props), filtradas por query y acotadas
+// a su propio budget. Parsea solo los action.md de ESA piece del full-catalog.
+// GET /catalog/pieces/:name/actions?q=&budget= -> { context, included, total, omitted, estimatedTokens }.
+// 404 claro si la piece no existe en el full-catalog.
+export function handlePieceActions(
+  name: string,
+  query: string | undefined,
+  budget: number | undefined,
+): HandlerResult {
+  const actions = loadPieceActions(name);
+  if (!actions) {
+    return { status: 404, body: { error: `piece not found in full-catalog: ${name}` } };
+  }
+  const maxTokens = budget && budget > 0 ? budget : 2000;
+  const result = retrieveActions(actions, query, { maxTokens });
   return { status: 200, body: result };
 }
 

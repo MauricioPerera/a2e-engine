@@ -4,6 +4,8 @@ import type { ExecuteRequest } from "../../flow-builder/src/flow-builder.js";
 import {
   handleCatalog,
   handleCatalogRetrieve,
+  handleCatalogPieces,
+  handlePieceActions,
   handlePiece,
   handleExecute,
   handleCreateTrigger,
@@ -93,6 +95,30 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const budget = budgetRaw ? Number(budgetRaw) : undefined;
     const mode = url.searchParams.get("mode") ?? undefined;
     return send(res, handleCatalogRetrieve(q, budget, mode));
+  }
+
+  // --- retriever jerárquico de 2 niveles ------------------------------------
+  // NIVEL 1: GET /catalog/pieces?q=&budget= -> pieces relevantes + action-name hints.
+  if (method === "GET" && pathname === "/catalog/pieces") {
+    const q = url.searchParams.get("q") ?? "";
+    const budgetRaw = url.searchParams.get("budget");
+    const budget = budgetRaw ? Number(budgetRaw) : undefined;
+    return send(res, handleCatalogPieces(q, budget));
+  }
+
+  // NIVEL 2: GET /catalog/pieces/:name/actions?q=&budget= -> actions DE UNA piece
+  // (con props), filtradas por query, acotadas al budget. :name incluye el scope
+  // (ej. @activepieces/piece-slack), por eso se matchea "<...>/actions" al final.
+  if (method === "GET" && pathname.startsWith("/catalog/pieces/")) {
+    const rest = decodeURIComponent(pathname.slice("/catalog/pieces/".length));
+    const m = rest.match(/^(.+)\/actions$/);
+    if (m) {
+      const pieceName = m[1];
+      const q = url.searchParams.get("q") ?? undefined;
+      const budgetRaw = url.searchParams.get("budget");
+      const budget = budgetRaw ? Number(budgetRaw) : undefined;
+      return send(res, handlePieceActions(pieceName, q, budget));
+    }
   }
 
   // GET /connections?projectId=&piece=&format=json|context&budget= ->
