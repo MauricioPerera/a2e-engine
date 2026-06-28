@@ -33,6 +33,7 @@ import {
   type AttestKnowledgeRequest,
   type AssembleAgentContextRequest,
 } from "./handlers.js";
+import { parseApiKeys, authenticate, isWebhookIngress } from "./auth.js";
 
 function send(res: ServerResponse, result: HandlerResult): void {
   if (typeof result.body === "string") {
@@ -53,10 +54,30 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+let authDevWarned = false;
+
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const { pathname } = url;
   const method = req.method ?? "GET";
+
+  // --- AUTH GATE -----------------------------------------------------------
+  // Enforced only when API_KEYS is set. POST /webhooks/:id is exempt (the
+  // triggerId is the bearer secret for external emitters; see auth.ts TODO).
+  const apiKeyCfg = parseApiKeys(process.env.API_KEYS);
+  if (apiKeyCfg) {
+    if (!isWebhookIngress(method, pathname)) {
+      const auth = authenticate(req, apiKeyCfg);
+      if (!auth.valid) {
+        return send(res, { status: 401, body: { error: "unauthorized" } });
+      }
+      (req as IncomingMessage & { projectId?: string }).projectId = auth.projectId;
+    }
+  } else if (!authDevWarned) {
+    // eslint-disable-next-line no-console
+    console.warn("AUTH DISABLED (no API_KEYS)");
+    authDevWarned = true;
+  }
 
   if (method === "GET" && pathname === "/catalog") return send(res, handleCatalog());
 

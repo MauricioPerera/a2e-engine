@@ -32,8 +32,19 @@ Spec completa: `ESPECIFICACION-A2E.md`.
 | Ejecución reactiva — webhooks | product-api `/webhooks/:id` | ✅ |
 | Dedup con cursor durable | trigger-runtime `FileCursorStore` | ✅ |
 | API HTTP del producto | product-api | ✅ |
+| **Run history** (OKF+git, audit/reproduce) | run-logger | ✅ |
+| **Registro de workflows** (guardar/descubrir/re-ejecutar, versionado) | workflow-registry | ✅ |
+| **Base de conocimiento** (freshness TTL + vigencia humana) | knowledge-base | ✅ |
+| **Provider `okf_catalog`** (catálogo acotado a budget, sin RAG) | okf-retriever | ✅ |
+| **Provider `connection_refs`** (referencias del vault, sin fuga) | connection-provider | ✅ |
+| **Contrato CCDD** (slots firmados + gate CI L1/L2) | `contract/` + `.github/workflows/ccdd-gate.yml` | ✅ |
+| **L3 — runtime assembly** (contrato→contexto acotado+guardrails) | context-assembler + `POST /agent/context` | ✅ |
+| **Backend durable** (vault/store/files sobreviven reinicio) | backend-mock `Durable*` (env `DATA_DIR`) | ✅ |
+| Auth por API-key (en progreso) | product-api (env `API_KEYS`) | 🔄 |
 
-**Pendiente (opcional, compliance):** escaneo SCA (ScanCode/FOSSA) sobre el set final de pieces a comercializar.
+**Stack de governance (4 capas):** OKF+git (catálogo·flows·runs·conocimiento) · CCDD (contrato firmado + gate) · freshness (TTL) · vigencia (attestation humana). Ver `ESPECIFICACION-A2E.md`, `ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md`, `CONTRATO-CCDD-A2E.md`.
+
+**Pendiente (opcional):** escaneo SCA sobre el set final de pieces; backend durable a DB/Redis/S3 (hoy file-backed); L3 parseo real de `context.yaml`.
 
 ---
 
@@ -58,7 +69,15 @@ Detalle técnico y mecanismo del piece-loader: `ANEXO-ARQUITECTURA-MOTOR-API.md`
 | `backend-mock` | `Vault` (cifrado), `MemoryStore`, `MemoryFileStore`, `createServer` → endpoints `v1/worker/*` que el engine consume |
 | `engine-adapter` | `build-engine.mjs` (bundle), `execute-flow.cjs`, `build-piece.mjs` (bundler genérico de pieces), `gen-full-catalog.ts`+`load-one-piece.mjs`, `full-catalog/` (710 pieces), pieces propias (`@automators/piece-*`) |
 | `trigger-runtime` | `dedup.ts` (`selectNewItems`), `poll-runner.ts` (`startReactivePoll` + modo cron), `cron.ts` (`nextRun`), `cursor-store.ts` (Memory/File) |
-| `product-api` | servidor HTTP (node:http) que ata todo; arranca el mock interno |
+| `run-logger` | `run-store.ts` — cada ejecución como `run-<id>.md` OKF + commit git; endpoints `/runs` |
+| `workflow-registry` | `workflow-store.ts` — workflows como OKF+git (guardar/descubrir/re-ejecutar, versionado) |
+| `knowledge-base` | `knowledge-store.ts` — aprendizajes OKF+git con freshness TTL + vigencia (`attestEntry`); bucle run-failure→stub |
+| `okf-retriever` | `retrieve(pieces, query, {maxTokens})` — provider `okf_catalog`: catálogo acotado a budget, estructural (sin RAG) |
+| `connection-provider` | `renderConnectionRefs` — provider `connection_refs`: referencias del vault, nunca secretos |
+| `context-assembler` | `assembleContext(slots, {totalBudget})` + guardrails — L3 runtime assembly |
+| `product-api` | servidor HTTP (node:http) que ata todo; arranca el mock interno; auth por `API_KEYS` |
+
+**Fuera de `packages/`:** `contract/` (contrato CCDD firmado: context.yaml + slots + `policies/*.md` OKF + expected-hashes.json) · `.github/workflows/ccdd-gate.yml` (gate L1/L2).
 
 ---
 
@@ -73,8 +92,16 @@ GET  /triggers/:id                 → estado + fired log
 DELETE /triggers/:id               → detiene el loop
 POST /webhook-triggers             → registra trigger WEBHOOK → { triggerId, webhookUrl }
 GET/DELETE /webhook-triggers/:id   → estado / baja
-POST /webhooks/:triggerId          → ingress: el evento dispara el flow
+POST /webhooks/:triggerId          → ingress: el evento dispara el flow (no requiere API-key)
+GET  /catalog/retrieve?q=&budget=  → subconjunto del catálogo acotado a budget (provider okf_catalog)
+GET  /connections?projectId=&format= → referencias de credenciales (nunca secretos)
+POST /workflows · GET /workflows · GET /workflows/:id · POST /workflows/:id/execute  → registro de workflows
+GET  /runs · GET /runs/:date/:runId                    → run history (OKF+git)
+POST /knowledge · GET /knowledge · GET /knowledge/:id · POST /knowledge/:id/attest   → base de conocimiento
+POST /agent/context                → L3: ensambla el contexto del agente según el contrato CCDD
 ```
+
+Todas las rutas (salvo `POST /webhooks/:id`) exigen `X-API-Key` cuando `API_KEYS` está configurado; sin esa env, modo dev abierto.
 
 ### Contrato del agente (ExecuteRequest)
 ```json
