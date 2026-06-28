@@ -1,0 +1,16 @@
+{
+  "name": "okf-generator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generates an OKF (Open Knowledge Format) catalog from Activepieces piece metadata, for agent-driven piece discovery without vectors/RAG.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build:catalog": "tsx src/cli.ts",
+    "demo": "tsx src/cli.ts ./out/catalog"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

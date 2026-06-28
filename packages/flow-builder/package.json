@@ -1,0 +1,15 @@
+{
+  "name": "flow-builder",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}
