@@ -25,6 +25,7 @@ import {
   handleAttestKnowledge,
   handleListConnections,
   handleAssembleAgentContext,
+  handleAgentRun,
   handleDiscoverSources,
   type HandlerResult,
   type CreateTriggerRequest,
@@ -34,6 +35,7 @@ import {
   type AttestKnowledgeRequest,
   type AssembleAgentContextRequest,
   type DiscoverSourcesRequest,
+  type AgentRunRequest,
 } from "./handlers.js";
 import { parseApiKeys, authenticate, isWebhookIngress } from "./auth.js";
 
@@ -318,6 +320,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return send(res, { status: 400, body: { error: "query (string) required" } });
     }
     return send(res, handleAssembleAgentContext(parsed));
+  }
+
+  // POST /agent/run { task, projectId? } -> ejecuta el orquestador A2E con el
+  // ollama-provider real (gemma4:31b-cloud por defecto). Hace una llamada REAL al LLM.
+  if (method === "POST" && pathname === "/agent/run") {
+    const raw = await readBody(req);
+    let parsed: AgentRunRequest;
+    try {
+      parsed = JSON.parse(raw) as AgentRunRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    if (typeof parsed.task !== "string") {
+      return send(res, { status: 400, body: { error: "task (string) required" } });
+    }
+    return send(res, await handleAgentRun(parsed));
   }
 
     send(res, { status: 404, body: { error: `no route for ${method} ${pathname}` } });

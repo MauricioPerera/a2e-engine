@@ -61,6 +61,8 @@ import {
   type WebhookRegistration,
 } from "./trigger-registry.js";
 import { discoverSource, type DiscoverOptions } from "../../piece-source-manager/src/discover.js";
+import { runAgent } from "../../agent-runtime/src/orchestrator.js";
+import { callOllama } from "../../agent-runtime/src/ollama-provider.js";
 
 const require = createRequire(import.meta.url);
 // Persisted cursor store for POLLING triggers: keeps `seen` on disk so the
@@ -1018,5 +1020,32 @@ export async function handleDiscoverSources(req: DiscoverSourcesRequest): Promis
     };
   } catch (e) {
     return { status: 500, body: { error: (e as Error).message } };
+  }
+}
+
+// --- agent run (L3 CCDD: orquestador A2E que envuelve un LLM via Ollama) -----
+// POST /agent/run { task, projectId? } -> ejecuta runAgent con el ollama-provider
+// real (model gemma4:31b-cloud por defecto) -> { ok, result, request, attempts, transcript }.
+// El orquestador llama de vuelta a esta misma API (/agent/context, /execute, /knowledge).
+export interface AgentRunRequest {
+  task: string;
+  projectId?: string;
+}
+
+export async function handleAgentRun(req: AgentRunRequest): Promise<HandlerResult> {
+  if (typeof req.task !== "string" || req.task.length === 0) {
+    return { status: 400, body: { error: "task (string) required" } };
+  }
+  const port = Number(process.env.PORT ?? "8080");
+  const apiBase = `http://localhost:${port}`;
+  try {
+    const result = await runAgent(req.task, {
+      apiBase,
+      ...(req.projectId ? { projectId: req.projectId } : {}),
+      llm: (prompt, system) => callOllama(prompt, { system }),
+    });
+    return { status: 200, body: result };
+  } catch (e) {
+    return { status: 500, body: { error: `agent run failed: ${(e as Error).message}` } };
   }
 }
