@@ -45,3 +45,7 @@ catalog-summary.json
 
 # piece-source-manager: custom workdir for discover() clones (default is os.tmpdir(), outside repo)
 **/.psm-workdir/
+
+# piece-validator: staging dir (if ever used)
+**/.piece-validator-stage/
+.piece-validator-stage/

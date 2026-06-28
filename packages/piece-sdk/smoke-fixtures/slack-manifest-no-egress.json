@@ -1,0 +1,4 @@
+{
+  "auth": "OAUTH2",
+  "network": { "egress": [] }
+}

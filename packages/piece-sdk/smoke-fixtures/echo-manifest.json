@@ -1,0 +1,4 @@
+{
+  "auth": "SECRET_TEXT",
+  "network": { "egress": [] }
+}
