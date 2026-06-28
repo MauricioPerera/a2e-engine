@@ -30,7 +30,9 @@ import {
   handleAgentRun,
   handleDiscoverSources,
   handleBuildSources,
+  handleValidateWorkflow,
   type HandlerResult,
+  type ValidateWorkflowRequest,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
   type CreateWorkflowRequest,
@@ -251,6 +253,19 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // GET  /workflows              -> lista (?format=okf -> index.md crudo)
   // GET  /workflows/:id          -> doc OKF (markdown) + record
   // POST /workflows/:id/execute  -> re-ejecuta el workflow guardado
+  // POST /workflows/validate      -> validación PRE-EJECUCIÓN combinada
+  //   (estructura + contexto + input). { ok, findings }. No toca el engine.
+  if (method === "POST" && pathname === "/workflows/validate") {
+    const raw = await readBody(req);
+    let parsed: ValidateWorkflowRequest;
+    try {
+      parsed = JSON.parse(raw) as ValidateWorkflowRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    return send(res, await handleValidateWorkflow(parsed));
+  }
+
   if (method === "POST" && pathname === "/workflows") {
     const raw = await readBody(req);
     let parsed: CreateWorkflowRequest;

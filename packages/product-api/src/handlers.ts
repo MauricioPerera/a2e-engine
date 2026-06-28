@@ -16,6 +16,12 @@ import {
   type PieceStepReq,
 } from "../../flow-builder/src/flow-builder.js";
 import { validateActionInput } from "../../flow-builder/src/validate-input.js";
+import { flattenSteps } from "../../flow-builder/src/validate-workflow.js";
+import {
+  validateWorkflow,
+  type CatalogPiece,
+  type WfFinding,
+} from "../../flow-builder/src/validate-workflow-context.js";
 import { generateOkfCatalog } from "../../okf-generator/src/okf-generator.js";
 import type { OkfFile } from "../../okf-generator/src/types.js";
 import {
@@ -390,8 +396,117 @@ async function runFlow(
   }
 }
 
+// --- validación combinada (estructura + contexto) ---------------------------
+// Catálogo de validación TARGETED: solo las pieces referenciadas por el workflow,
+// con los NOMBRES (keys) reales de sus actions. Combina dos fuentes para no regresar
+// pieces custom del demo:
+//   - demoPieces: pieces custom bundled (echo, json-demo) -> actions vía action.name.
+//   - full-catalog (loadPieceActions): 710 pieces community -> actions vía
+//     `**action name:**` del action.md (key real, no displayName).
+// Una piece referenciada que no está en ninguna fuente NO se añade al catálogo ->
+// validatePiecesExist emite piece-not-found. Nota: catalog-summary.json NO sirve
+// para validar actions porque sus actions[].name son displayNames ("Convert Text
+// to Json"), no las keys que el workflow usa ("convert_text_to_json").
+const demoPiecesByName = new Map(demoPieces.map((p) => [p.name, p]));
+
+function pieceStepPieceNames(req: ExecuteRequest): string[] {
+  const names = new Set<string>();
+  for (const s of flattenSteps(req.steps)) {
+    const t = s.type ?? "piece";
+    if (t !== "piece") continue;
+    if (s.pieceName) names.add(s.pieceName);
+  }
+  return [...names];
+}
+
+function buildValidationCatalog(req: ExecuteRequest): CatalogPiece[] {
+  const catalog: CatalogPiece[] = [];
+  for (const pn of pieceStepPieceNames(req)) {
+    const demo = demoPiecesByName.get(pn);
+    if (demo) {
+      catalog.push({
+        name: pn,
+        actions: Object.values(demo.actions).map((a) => ({ name: a.name })),
+      });
+      continue;
+    }
+    const actions = loadPieceActions(pn); // ActionDetail[] | null (cached)
+    if (actions) {
+      catalog.push({ name: pn, actions: actions.map((a) => ({ name: a.name })) });
+    }
+    // no demo ni full-catalog -> se omite -> piece-not-found
+  }
+  return catalog;
+}
+
+function availableConnections(projectId: string): string[] {
+  const vault = getVault();
+  if (!vault) return [];
+  return vault.listReferences(projectId).map((r) => r.externalId);
+}
+
+// validateWorkflowCore: combinación PURA structure+context. La usa el pre-flight de
+// /execute y (con validateActionInput añadido) el endpoint /workflows/validate.
+function validateWorkflowCore(
+  req: ExecuteRequest,
+  projectId: string,
+): { ok: boolean; findings: WfFinding[] } {
+  return validateWorkflow(req, buildValidationCatalog(req), availableConnections(projectId));
+}
+
+// POST /workflows/validate { steps, projectId? } -> { ok, findings }.
+// Corre la validación combinada: estructura (forma/unicidad/refs de steps) +
+// contexto (pieces+actions contra el catálogo, connections contra el vault) +
+// validateActionInput por step (reusado, opcional). ok = sin findings de error.
+export interface ValidateWorkflowRequest {
+  steps: Array<Record<string, unknown>>;
+  projectId?: string;
+}
+
+export async function handleValidateWorkflow(req: ValidateWorkflowRequest): Promise<HandlerResult> {
+  if (!req || !Array.isArray(req.steps)) {
+    return { status: 400, body: { error: "steps (array) required" } };
+  }
+  const wfReq: ExecuteRequest = { steps: req.steps as ExecuteRequest["steps"] };
+  const projectId = typeof req.projectId === "string" && req.projectId ? req.projectId : PROJECT_ID;
+  const core = validateWorkflowCore(wfReq, projectId);
+  const findings: WfFinding[] = [...core.findings];
+  // Reuso opcional: validateActionInput por piece step indexado (mismo índice que
+  // /execute). Añade findings 'input-invalid' sin alterar los del core.
+  for (const s of flattenSteps(wfReq.steps)) {
+    const ps = s as PieceStepReq;
+    if (!ps.pieceName || !ps.actionName) continue;
+    const props = actionPropsIndex.get(`${ps.pieceName}|${ps.actionName}`);
+    if (!props) continue;
+    const res = validateActionInput(ps.input ?? {}, props);
+    if (!res.ok) {
+      for (const e of res.errors) {
+        findings.push({
+          level: "error",
+          code: "input-invalid",
+          message: e,
+          path: ps.name ?? `${ps.pieceName}/${ps.actionName}`,
+        });
+      }
+    }
+  }
+  const ok = !findings.some((f) => f.level === "error");
+  return { status: 200, body: { ok, findings } };
+}
+
 // POST /execute -> validate each step's input, build flow, run it, return REAL result.
 export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult> {
+  // PRE-FLIGHT (tier estructura + contexto): caza workflows inválidos ANTES de
+  // tocar el engine. piece inexistente (antes PieceNotFoundError del engine en
+  // runtime), ref a step inexistente, connection inexistente -> 400 workflow_invalid
+  // con los findings, SIN ejecutar. NO incluye validateActionInput (esa gatea el
+  // input per-step y sigue devolviendo 400 validation_failed para no romper la
+  // semántica previa); por eso el pre-flight es estructura+contexto únicamente.
+  const preflight = validateWorkflowCore(req, PROJECT_ID);
+  if (!preflight.ok) {
+    return { status: 400, body: { error: "workflow_invalid", findings: preflight.findings } };
+  }
+
   // A2E: valida el input de cada piece step contra las props de su action ANTES
   // de construir/ejecutar. Si algún step es inválido, 400 con errores claros por
   // step y NO se ejecuta el flow. Router/loop steps (sin pieceName+actionName) y
