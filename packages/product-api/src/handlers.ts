@@ -19,6 +19,13 @@ import {
   listRuns,
   getRun,
 } from "../../run-logger/src/run-store.js";
+import {
+  saveWorkflow,
+  listWorkflows,
+  getWorkflow,
+  getIndexMarkdown,
+} from "../../workflow-registry/src/workflow-store.js";
+import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID } from "./mock-backend.js";
 import {
@@ -50,6 +57,12 @@ const pollingCursorStore = new FileCursorStore(CURSOR_DIR);
 // (manual/webhook), pero un fallo del run-history NUNCA rompe la respuesta del
 // endpoint (recordRunBestEffort traga todo).
 const RUNS_REPO = process.env.RUNS_REPO ?? path.join(os.homedir(), "product/.run-history");
+
+// Repo de workflow-registry (OKF + git por workflow). Configurable vía env;
+// default bajo ~/product/.workflow-registry. Aquí los fallos SÍ son fatales
+// para el endpoint de guardado (el agente debe saber si su workflow no se
+// persistió); listado/lectura son best-effort (repo vacío = lista vacía).
+const WORKFLOWS_REPO = process.env.WORKFLOWS_REPO ?? path.join(os.homedir(), "product/.workflow-registry");
 
 // Registra un run en el run-history a partir del resultado del engine. Best-effort:
 // captura cualquier error internamente para no propagarlo al caller. `await` para
@@ -145,6 +158,55 @@ export function handlePiece(name: string): HandlerResult {
   return { status: 200, body: file.content };
 }
 
+// Ejecuta un action YA CONSTRUIDO contra el engine, registra el run en el
+// run-history (best-effort) y devuelve el body {status, output, error?}. Lanza
+// si executeFlow falla de forma fatal (el caller decide el status HTTP). Es el
+// CAMINO COMÚN de ejecución: lo usan /execute y /workflows/:id/execute (reuso
+// de flows: el agente guarda una vez, ejecuta muchas).
+async function runFlow(
+  action: unknown,
+  source: string,
+): Promise<{ status: string; output: unknown; error?: string }> {
+  const startedAt = new Date().toISOString();
+  try {
+    const result = await executeFlow({
+      action,
+      port: String(MOCK_PORT),
+      engineToken: ENGINE_TOKEN,
+      projectId: PROJECT_ID,
+    });
+    const finishedAt = new Date().toISOString();
+    const verdict = result.verdict ?? { status: "UNKNOWN" };
+    const stepsMap = result.steps ?? {};
+    // Run-history best-effort: NO rompe la respuesta si falla.
+    await recordRunBestEffort({ source, startedAt, finishedAt, verdict, steps: stepsMap });
+    const stepNames = Object.keys(stepsMap);
+    const last = stepNames[stepNames.length - 1];
+    const step = last ? stepsMap[last] : undefined;
+    return {
+      status: step?.status ?? String(result.verdict),
+      output: step?.output ?? null,
+      ...(step?.errorMessage ? { error: step.errorMessage } : {}),
+    };
+  } catch (e) {
+    const finishedAt = new Date().toISOString();
+    // Registra el run FAILED aunque executeFlow haya lanzado (ej. piece inexistente).
+    await recordRunBestEffort({
+      source,
+      startedAt,
+      finishedAt,
+      verdict: { status: "FAILED" },
+      steps: {},
+      error: {
+        name: (e as Error)?.name,
+        message: (e as Error)?.message,
+        stack: (e as Error)?.stack,
+      },
+    });
+    throw e;
+  }
+}
+
 // POST /execute -> validate each step's input, build flow, run it, return REAL result.
 export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult> {
   // A2E: valida el input de cada piece step contra las props de su action ANTES
@@ -181,45 +243,10 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
     return { status: 400, body: { error: `invalid request: ${(e as Error).message}` } };
   }
 
-  const startedAt = new Date().toISOString();
   try {
-    const result = await executeFlow({
-      action,
-      port: String(MOCK_PORT),
-      engineToken: ENGINE_TOKEN,
-      projectId: PROJECT_ID,
-    });
-    const finishedAt = new Date().toISOString();
-    const verdict = result.verdict ?? { status: "UNKNOWN" };
-    const stepsMap = result.steps ?? {};
-    // Run-history best-effort: NO rompe la respuesta si falla.
-    await recordRunBestEffort({ source: "manual", startedAt, finishedAt, verdict, steps: stepsMap });
-    const stepNames = Object.keys(stepsMap);
-    const last = stepNames[stepNames.length - 1];
-    const step = last ? stepsMap[last] : undefined;
-    return {
-      status: 200,
-      body: {
-        status: step?.status ?? String(result.verdict),
-        output: step?.output ?? null,
-        ...(step?.errorMessage ? { error: step.errorMessage } : {}),
-      },
-    };
+    const body = await runFlow(action, "manual");
+    return { status: 200, body };
   } catch (e) {
-    const finishedAt = new Date().toISOString();
-    // Registra el run FAILED aunque executeFlow haya lanzado (ej. piece inexistente).
-    await recordRunBestEffort({
-      source: "manual",
-      startedAt,
-      finishedAt,
-      verdict: { status: "FAILED" },
-      steps: {},
-      error: {
-        name: (e as Error)?.name,
-        message: (e as Error)?.message,
-        stack: (e as Error)?.stack,
-      },
-    });
     return { status: 500, body: { error: `execution failed: ${(e as Error).message}` } };
   }
 }
@@ -238,6 +265,88 @@ export async function handleGetRun(date: string, runId: string): Promise<Handler
   const md = await getRun({ repoDir: RUNS_REPO, date, runId });
   if (md == null) return { status: 404, body: { error: `run not found: ${date}/${runId}` } };
   return { status: 200, body: md };
+}
+
+// --- workflow-registry (OKF + git por workflow) ----------------------------
+//
+// El agente GUARDA workflows (POST /workflows), los DESCUBRE (GET /workflows),
+// los LEE (GET /workflows/:id) y los RE-EJECUTA (POST /workflows/:id/execute).
+// Cada workflow se persiste como doc OKF + commit de git en WORKFLOWS_REPO.
+
+// HTTP body for POST /workflows. `id` es opcional: si se omite, se genera un
+// uuid; si se pasa, se reusa (y saveWorkflow versiona: v1->v2... en re-save).
+// `steps` sigue la misma forma que /execute (PieceStepReq | router | loop).
+export interface CreateWorkflowRequest {
+  id?: string;
+  name: string;
+  description?: string;
+  steps: Array<Record<string, unknown>>;
+}
+
+// POST /workflows -> genera id (uuid si no viene), createdAt/updatedAt, guarda
+// via saveWorkflow (OKF + commit). Devuelve { id, version }.
+export async function handleCreateWorkflow(req: CreateWorkflowRequest): Promise<HandlerResult> {
+  if (!req || typeof req.name !== "string" || !req.name) {
+    return { status: 400, body: { error: "name is required" } };
+  }
+  if (!Array.isArray(req.steps) || req.steps.length === 0) {
+    return { status: 400, body: { error: "steps must be a non-empty array" } };
+  }
+  const now = new Date().toISOString();
+  const wf: WorkflowRecord = {
+    id: typeof req.id === "string" && req.id ? req.id : randomUUID(),
+    name: req.name,
+    createdAt: now,
+    updatedAt: now,
+    steps: req.steps as WorkflowStep[],
+    ...(req.description !== undefined ? { description: req.description } : {}),
+  };
+  let saved: { path: string; version: string };
+  try {
+    saved = await saveWorkflow(wf, { repoDir: WORKFLOWS_REPO });
+  } catch (e) {
+    return { status: 500, body: { error: `save failed: ${(e as Error).message}` } };
+  }
+  return { status: 201, body: { id: wf.id, version: saved.version, path: saved.path } };
+}
+
+// GET /workflows -> lista los workflows (id/name/piecesUsed/stepCount/updatedAt
+// /version). Con ?format=okf devuelve el index.md crudo del registro.
+export async function handleListWorkflows(format?: string): Promise<HandlerResult> {
+  if (format === "okf") {
+    const md = await getIndexMarkdown({ repoDir: WORKFLOWS_REPO });
+    if (md == null) return { status: 404, body: { error: "registry index not generated yet" } };
+    return { status: 200, body: md };
+  }
+  const workflows = await listWorkflows({ repoDir: WORKFLOWS_REPO });
+  return { status: 200, body: { workflows } };
+}
+
+// GET /workflows/:id -> el doc OKF (markdown) + el record (con steps[]).
+export async function handleGetWorkflow(id: string): Promise<HandlerResult> {
+  const got = await getWorkflow({ repoDir: WORKFLOWS_REPO, id });
+  if (got == null) return { status: 404, body: { error: `workflow not found: ${id}` } };
+  return { status: 200, body: { markdown: got.markdown, record: got.record } };
+}
+
+// POST /workflows/:id/execute -> carga el workflow guardado, toma sus steps[] y
+// los EJECUTA por el mismo camino que /execute (buildFlowFromRequest -> runFlow).
+// Reuso de flows: el agente guarda una vez, ejecuta muchas.
+export async function handleExecuteWorkflow(id: string): Promise<HandlerResult> {
+  const got = await getWorkflow({ repoDir: WORKFLOWS_REPO, id });
+  if (got == null) return { status: 404, body: { error: `workflow not found: ${id}` } };
+  let action: unknown;
+  try {
+    action = buildFlowFromRequest({ steps: got.record.steps } as ExecuteRequest, new Date().toISOString());
+  } catch (e) {
+    return { status: 400, body: { error: `invalid stored workflow: ${(e as Error).message}` } };
+  }
+  try {
+    const body = await runFlow(action, `workflow:${id}`);
+    return { status: 200, body };
+  } catch (e) {
+    return { status: 500, body: { error: `execution failed: ${(e as Error).message}` } };
+  }
 }
 
 // --- reactive triggers -----------------------------------------------------

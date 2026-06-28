@@ -1,0 +1,14 @@
+{
+  "name": "workflow-registry",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test src/workflow-registry.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

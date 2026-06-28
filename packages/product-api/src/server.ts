@@ -14,9 +14,14 @@ import {
   handleWebhookIngress,
   handleListRuns,
   handleGetRun,
+  handleCreateWorkflow,
+  handleListWorkflows,
+  handleGetWorkflow,
+  handleExecuteWorkflow,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
+  type CreateWorkflowRequest,
 } from "./handlers.js";
 
 function send(res: ServerResponse, result: HandlerResult): void {
@@ -155,6 +160,40 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     const [date, runId] = parts;
     return send(res, await handleGetRun(date, runId));
+  }
+
+  // --- workflow-registry (OKF + git por workflow) -------------------------
+  // POST /workflows              -> guarda (genera id, versiona en re-save)
+  // GET  /workflows              -> lista (?format=okf -> index.md crudo)
+  // GET  /workflows/:id          -> doc OKF (markdown) + record
+  // POST /workflows/:id/execute  -> re-ejecuta el workflow guardado
+  if (method === "POST" && pathname === "/workflows") {
+    const raw = await readBody(req);
+    let parsed: CreateWorkflowRequest;
+    try {
+      parsed = JSON.parse(raw) as CreateWorkflowRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    return send(res, await handleCreateWorkflow(parsed));
+  }
+
+  if (method === "GET" && pathname === "/workflows") {
+    const format = url.searchParams.get("format") ?? undefined;
+    return send(res, await handleListWorkflows(format));
+  }
+
+  if (pathname.startsWith("/workflows/")) {
+    const rest = decodeURIComponent(pathname.slice("/workflows/".length));
+    const parts = rest.split("/");
+    if (!parts[0]) return send(res, { status: 404, body: { error: "workflow id required" } });
+    const [id, op] = parts;
+    if (method === "GET" && parts.length === 1) {
+      return send(res, await handleGetWorkflow(id));
+    }
+    if (method === "POST" && parts.length === 2 && op === "execute") {
+      return send(res, await handleExecuteWorkflow(id));
+    }
   }
 
     send(res, { status: 404, body: { error: `no route for ${method} ${pathname}` } });

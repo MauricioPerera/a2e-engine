@@ -14,3 +14,7 @@ node_modules/
 **/.run-history/
 .run-history/
 **/verify-runs-*/
+
+# workflow registry repo (OKF+git workflow store) — never commit nested
+**/.workflow-registry/
+.workflow-registry/
