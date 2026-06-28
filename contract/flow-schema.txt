@@ -1,0 +1,10 @@
+ExecuteRequest que el agente A2E debe emitir:
+- Raiz: { "steps": [ ... ] }
+- Cada step es uno de:
+  - { "pieceName": "<id>", "actionName": "<action>", "input": { ... opcional } }
+  - { "type": "router", "branches": [ { "condition": "...", "steps": [...] } ] }
+  - { "type": "loop", "over": "<ref>", "steps": [...] }
+- pieceName debe existir en el slot catalog.
+- input, si esta, debe conformar el schema de la action (validateActionInput).
+- Conexiones solo como {{connections.X}}; nunca el secreto.
+Validacion formal: execute-request.schema.json (guardrail output-schema).

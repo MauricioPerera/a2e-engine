@@ -1,0 +1,60 @@
+# CCDD gate (L2 / CI) para el contrato del agente A2E.
+# Materializa el estandar de seguridad como contrato enforceable:
+#   - lint  (L1): valida esquema + presupuesto + referencias y verifica los hashes
+#                 de los slots estaticos firmados (expected-hashes.json). Falla si
+#                 alguien debilita una politica firmada sin re-firmar.
+#   - diff  (L2): gate de regresion R1-R9 vs el contrato en el commit previo
+#                 (baja budget, degrada prioridad/criticidad, pierde firma, elimina
+#                 guardrail, etc.). Requiere quorum/atestaciones para cambios de
+#                 politica.
+name: ccdd-gate
+
+on:
+  push:
+    paths:
+      - 'contract/**'
+      - '.github/workflows/ccdd-gate.yml'
+  pull_request:
+    paths:
+      - 'contract/**'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # diff necesita el padre (HEAD^)
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install CCDD deps
+        run: pip install --no-input pyyaml jsonschema
+
+      - name: Clone CCDD reference tool
+        run: git clone --depth 1 https://github.com/MauricioPerera/ccdd ${{ runner.temp }}/ccdd-tool
+
+      - name: L1 — lint + verify (firmas del contrato)
+        working-directory: ${{ runner.temp }}/ccdd-tool/ccdd_reference
+        run: |
+          python3 ccdd.py lint "$GITHUB_WORKSPACE/contract"
+          # lint en modo verify: exit 1 si expected-hashes.json no coincide con los
+          # slots estaticos actuales (alguien toco una politica firmada sin re-firmar).
+
+      - name: L2 — diff de regresion vs contrato en HEAD^ (R1-R9)
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ runner.temp }}/ccdd-tool/ccdd_reference
+        run: |
+          set -eu
+          BASE=$(mktemp -d)
+          # materializa el contrato del commit padre como baseline
+          git -C "$GITHUB_WORKSPACE" archive HEAD^ contract | tar -x -C "$BASE"
+          python3 ccdd.py diff "$BASE/contract" "$GITHUB_WORKSPACE/contract"
+          # diff: exit 0 = sin regresiones (o cambios aprobados con atestaciones validas);
+          # exit != 0 = el gate bloquea el merge.

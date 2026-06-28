@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a2e.dev/schemas/execute-request.json",
+  "title": "ExecuteRequest",
+  "type": "object",
+  "required": ["steps"],
+  "additionalProperties": false,
+  "properties": {
+    "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+  },
+  "$defs": {
+    "step": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["pieceName", "actionName"],
+          "additionalProperties": false,
+          "properties": {
+            "pieceName": { "type": "string", "minLength": 1 },
+            "actionName": { "type": "string", "minLength": 1 },
+            "input": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "branches"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "router" },
+            "branches": { "type": "array", "minItems": 1, "items": { "type": "object" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "over", "steps"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "loop" },
+            "over": { "type": "string" },
+            "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+          }
+        }
+      ]
+    }
+  }
+}

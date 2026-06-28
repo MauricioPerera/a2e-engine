@@ -1,0 +1,56 @@
+ccdd_version: "0.1"
+contract:
+  name: a2e-agent
+  budget:
+    model: claude-opus-4-8
+    max_tokens: 16000
+    reserve_output: 4000
+  slots:
+    - id: environment
+      priority: 0
+      source: { type: static, path: env.txt, sign: true }
+      compaction: none
+      min_tokens: 20
+    - id: system
+      priority: 1
+      source: { type: static, path: system.txt, sign: true }
+      compaction: none
+      min_tokens: 60
+    - id: policies
+      priority: 1
+      source: { type: static, path: policies.md, sign: true }
+      compaction: none
+      min_tokens: 80
+      review_quorum: 2
+    - id: flow_schema
+      priority: 2
+      source: { type: static, path: flow-schema.txt, sign: true }
+      compaction: none
+      min_tokens: 40
+    - id: catalog
+      priority: 3
+      source: { type: dynamic, provider: okf_catalog }
+      compaction: summarize
+      max_tokens: 6000
+    - id: connections
+      priority: 3
+      source: { type: dynamic, provider: connection_refs }
+      compaction: truncate
+      max_tokens: 1000
+    - id: user_message
+      priority: 4
+      source: { type: runtime }
+      compaction: truncate
+  guardrails:
+    - id: no-secrets
+      type: regex_deny
+      pattern: "(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+      on_fail: abort
+    - id: output-schema
+      type: json_schema
+      target_slot: user_message
+      schema_path: execute-request.schema.json
+      on_fail: abort
+    - id: connection-refs
+      type: reference_check
+      on_fail: abort
