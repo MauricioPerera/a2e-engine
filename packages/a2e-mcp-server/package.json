@@ -1,0 +1,17 @@
+{
+  "name": "@a2e/mcp-server",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "a2e-mcp-server": "src/server.ts"
+  },
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "smoke": "tsx smoke-mcp.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}
