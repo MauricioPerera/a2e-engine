@@ -50,7 +50,7 @@ function validateDisplay(meta: PieceMetaLike): Finding[] {
     out.push({ level: 'error', code: 'missing-displayName', message: 'piece is missing displayName' });
   }
   if (!meta.description || meta.description.length < 10) {
-    out.push({ level: 'error', code: 'short-description', message: 'piece description is missing or shorter than 10 chars' });
+    out.push({ level: 'warn', code: 'short-description', message: 'piece description is missing or shorter than 10 chars' });
   }
   return out;
 }
@@ -63,7 +63,7 @@ function validateAction(action: ActionMeta): Finding[] {
   }
   if (!action.description) {
     if (!action.displayName) {
-      out.push({ level: 'error', code: 'action-missing-description', message: `action "${action.name}" is missing both description and displayName` });
+      out.push({ level: 'warn', code: 'action-missing-description', message: `action "${action.name}" is missing both description and displayName` });
     } else {
       out.push({ level: 'warn', code: 'action-missing-description', message: `action "${action.name}" is missing a description` });
     }

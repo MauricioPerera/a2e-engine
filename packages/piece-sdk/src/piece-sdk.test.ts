@@ -26,9 +26,9 @@ test('validateMetadata: missing displayName', () => {
 
 test('validateMetadata: short description', () => {
   const meta: PieceMetaLike = { ...cleanMeta, description: 'short' };
-  assert.ok(codesAt('error', validateMetadata(meta)).includes('short-description'));
+  assert.ok(codesAt('warn', validateMetadata(meta)).includes('short-description'));
   const meta2: PieceMetaLike = { ...cleanMeta, description: undefined };
-  assert.ok(codesAt('error', validateMetadata(meta2)).includes('short-description'));
+  assert.ok(codesAt('warn', validateMetadata(meta2)).includes('short-description'));
 });
 
 test('validateMetadata: invalid piece name', () => {
@@ -51,13 +51,13 @@ test('validateMetadata: action missing description -> warn when displayName pres
   assert.ok(!codesAt('error', f).includes('action-missing-description'));
 });
 
-test('validateMetadata: action missing description AND displayName -> error', () => {
+test('validateMetadata: action missing description AND displayName -> warn', () => {
   const meta: PieceMetaLike = {
     ...cleanMeta,
     actions: [{ name: 'do_thing' }],
   };
   const f = validateMetadata(meta);
-  assert.ok(codesAt('error', f).includes('action-missing-description'));
+  assert.ok(codesAt('warn', f).includes('action-missing-description'));
 });
 
 test('validateMetadata: invalid action name', () => {
@@ -197,4 +197,11 @@ test('validatePiece: metadata-only (no source) still validates metadata', () => 
   assert.equal(r.ok, false);
   assert.ok(r.findings.some((x) => x.code === 'missing-displayName'));
   assert.equal(r.facts, undefined);
+});
+test('validatePiece: piece only missing description -> ok=true with warn short-description', () => {
+  const meta: PieceMetaLike = { ...cleanMeta, description: undefined };
+  const r = validatePiece(meta);
+  assert.equal(r.ok, true);
+  assert.ok(r.findings.some((x) => x.code === 'short-description' && x.level === 'warn'));
+  assert.equal(r.findings.some((x) => x.level === 'error'), false);
 });
