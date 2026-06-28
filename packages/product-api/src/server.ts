@@ -18,10 +18,16 @@ import {
   handleListWorkflows,
   handleGetWorkflow,
   handleExecuteWorkflow,
+  handleCreateKnowledge,
+  handleListKnowledge,
+  handleGetKnowledge,
+  handleAttestKnowledge,
   type HandlerResult,
   type CreateTriggerRequest,
   type CreateWebhookTriggerRequest,
   type CreateWorkflowRequest,
+  type CreateKnowledgeRequest,
+  type AttestKnowledgeRequest,
 } from "./handlers.js";
 
 function send(res: ServerResponse, result: HandlerResult): void {
@@ -193,6 +199,47 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (method === "POST" && parts.length === 2 && op === "execute") {
       return send(res, await handleExecuteWorkflow(id));
+    }
+  }
+
+  // --- knowledge-base (OKF + git por entry) ---------------------------------
+  // POST   /knowledge             -> guarda aprendizaje (genera id, commit)
+  // GET    /knowledge             -> lista con freshness por entry (?format=okf -> index.md)
+  // GET    /knowledge/:id         -> doc OKF (markdown) + record
+  // POST   /knowledge/:id/attest  -> atesta vigencia humana
+  if (method === "POST" && pathname === "/knowledge") {
+    const raw = await readBody(req);
+    let parsed: CreateKnowledgeRequest;
+    try {
+      parsed = JSON.parse(raw) as CreateKnowledgeRequest;
+    } catch {
+      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+    }
+    return send(res, await handleCreateKnowledge(parsed));
+  }
+
+  if (method === "GET" && pathname === "/knowledge") {
+    const format = url.searchParams.get("format") ?? undefined;
+    return send(res, await handleListKnowledge(format));
+  }
+
+  if (pathname.startsWith("/knowledge/")) {
+    const rest = decodeURIComponent(pathname.slice("/knowledge/".length));
+    const parts = rest.split("/");
+    if (!parts[0]) return send(res, { status: 404, body: { error: "knowledge id required" } });
+    const [id, op] = parts;
+    if (method === "GET" && parts.length === 1) {
+      return send(res, await handleGetKnowledge(id));
+    }
+    if (method === "POST" && parts.length === 2 && op === "attest") {
+      const raw = await readBody(req);
+      let parsed: AttestKnowledgeRequest;
+      try {
+        parsed = JSON.parse(raw) as AttestKnowledgeRequest;
+      } catch {
+        return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+      }
+      return send(res, await handleAttestKnowledge(id, parsed));
     }
   }
 

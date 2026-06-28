@@ -18,3 +18,7 @@ node_modules/
 # workflow registry repo (OKF+git workflow store) — never commit nested
 **/.workflow-registry/
 .workflow-registry/
+
+# knowledge base repo (OKF+git knowledge store) — never commit nested
+**/.knowledge-base/
+.knowledge-base/

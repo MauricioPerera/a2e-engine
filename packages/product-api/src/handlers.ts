@@ -20,6 +20,14 @@ import {
   getRun,
 } from "../../run-logger/src/run-store.js";
 import {
+  addEntry,
+  listEntries,
+  getEntry,
+  attestEntry,
+  getKnowledgeIndexMarkdown,
+} from "../../knowledge-base/src/knowledge-store.js";
+import type { KnowledgeEntry } from "../../knowledge-base/src/knowledge-base.js";
+import {
   saveWorkflow,
   listWorkflows,
   getWorkflow,
@@ -64,9 +72,23 @@ const RUNS_REPO = process.env.RUNS_REPO ?? path.join(os.homedir(), "product/.run
 // persistió); listado/lectura son best-effort (repo vacío = lista vacía).
 const WORKFLOWS_REPO = process.env.WORKFLOWS_REPO ?? path.join(os.homedir(), "product/.workflow-registry");
 
+// Repo de knowledge-base (OKF + git por entry). Configurable vía env; default
+// bajo ~/product/.knowledge-base. Los fallos de los endpoints de escritura
+// (POST /knowledge, POST /knowledge/:id/attest) SÍ son fatales para esos
+// endpoints; listado/lectura son best-effort (repo vacío = lista vacía).
+const KNOWLEDGE_REPO = process.env.KNOWLEDGE_REPO ?? path.join(os.homedir(), "product/.knowledge-base");
+
 // Registra un run en el run-history a partir del resultado del engine. Best-effort:
 // captura cualquier error internamente para no propagarlo al caller. `await` para
 // que el smoke vea los commits de forma determinista (el coste es ~un commit/run).
+//
+// BUCLE DE APRENDIZAJE: si el run resulta FAILED, crea BEST-EFFORT un stub de
+// conocimiento (addEntry) con title "Run failed: <failedStep>", problem = el error,
+// resolution = "" (a completar por humano/agente), sourceRunId = runId,
+// tags=["auto","run-failure"], ttlDays corto (7). Opt-in vía KNOWLEDGE_REPO
+// presente en el env (así otros flujos que no configuren knowledge-base no
+// ensucian el repo por defecto). Nunca rompe la respuesta del endpoint: va
+// dentro del try/catch best-effort y se traga sus propios fallos.
 async function recordRunBestEffort(args: {
   source: string;
   startedAt: string;
@@ -76,8 +98,9 @@ async function recordRunBestEffort(args: {
   error?: { name?: string; message?: string; stack?: string };
 }): Promise<void> {
   try {
+    const runId = randomUUID();
     const run = flowRunFromResult({
-      runId: randomUUID(),
+      runId,
       source: args.source,
       startedAt: args.startedAt,
       finishedAt: args.finishedAt,
@@ -86,9 +109,48 @@ async function recordRunBestEffort(args: {
       ...(args.error ? { error: args.error } : {}),
     });
     await appendRun(run, { repoDir: RUNS_REPO });
+    // BUCLE APRENDIZAJE: run FAILED -> stub de conocimiento best-effort.
+    if (String(run.status).toUpperCase() === "FAILED" && process.env.KNOWLEDGE_REPO !== undefined) {
+      try {
+        await recordFailureKnowledgeStub(runId, run, args);
+      } catch (e) {
+        console.error(`[knowledge] failure-stub failed: ${(e as Error)?.message ?? e}`);
+      }
+    }
   } catch (e) {
     console.error(`[run-history] record failed: ${(e as Error)?.message ?? e}`);
   }
+}
+
+// Crea un stub de conocimiento a partir de un run FAILED. Best-effort: el caller
+// (recordRunBestEffort) ya aísla los fallos. El stub queda con resolution vacía
+// para que un humano/agente la complete luego (ésa es la "lección" pendiente).
+async function recordFailureKnowledgeStub(
+  runId: string,
+  run: { failedStep?: string; error?: { name?: string; message?: string } },
+  args: { error?: { name?: string; message?: string }; verdict?: { failedStep?: string } },
+): Promise<void> {
+  const failedStep =
+    run.failedStep ??
+    (typeof args.verdict?.failedStep === "string" ? args.verdict.failedStep : undefined) ??
+    args.error?.name ??
+    "unknown";
+  const errName = args.error?.name ?? run.error?.name ?? "";
+  const errMsg = args.error?.message ?? run.error?.message ?? "";
+  const problem = [errName, errMsg].filter(Boolean).join(": ") || "execution failed";
+  const now = new Date().toISOString();
+  const entry: KnowledgeEntry = {
+    id: randomUUID(),
+    title: `Run failed: ${failedStep}`,
+    tags: ["auto", "run-failure"],
+    createdAt: now,
+    updatedAt: now,
+    ttlDays: 7,
+    problem,
+    resolution: "",
+    sourceRunId: runId,
+  };
+  await addEntry(entry, { repoDir: KNOWLEDGE_REPO });
 }
 
 
@@ -346,6 +408,97 @@ export async function handleExecuteWorkflow(id: string): Promise<HandlerResult> 
     return { status: 200, body };
   } catch (e) {
     return { status: 500, body: { error: `execution failed: ${(e as Error).message}` } };
+  }
+}
+
+// --- knowledge-base (OKF + git por entry) -----------------------------------
+//
+// El agente APRENDE y CONSULTA: guarda aprendizajes operacionales (POST
+// /knowledge), descubre qué se sabe y si sigue vigente (GET /knowledge, con
+// freshness por entry), lee un doc OKF concreto (GET /knowledge/:id) y el
+// agente/humano atesta la vigencia de un entry (POST /knowledge/:id/attest).
+
+// HTTP body for POST /knowledge. ttlDays default 30. sourceRunId opcional
+// (vínculo al run que originó el aprendizaje, ej. un stub de fallo).
+export interface CreateKnowledgeRequest {
+  title: string;
+  tags?: string[];
+  ttlDays?: number;
+  problem: string;
+  resolution: string;
+  sourceRunId?: string;
+}
+
+// POST /knowledge -> genera id (uuid), createdAt/updatedAt now, ttlDays default
+// 30, guarda via addEntry (OKF + commit). Devuelve { id }.
+export async function handleCreateKnowledge(req: CreateKnowledgeRequest): Promise<HandlerResult> {
+  if (!req || typeof req.title !== "string" || !req.title) {
+    return { status: 400, body: { error: "title is required" } };
+  }
+  if (typeof req.problem !== "string" || typeof req.resolution !== "string") {
+    return { status: 400, body: { error: "problem and resolution are required strings" } };
+  }
+  const now = new Date().toISOString();
+  const entry: KnowledgeEntry = {
+    id: randomUUID(),
+    title: req.title,
+    tags: Array.isArray(req.tags) ? req.tags : [],
+    createdAt: now,
+    updatedAt: now,
+    ttlDays: typeof req.ttlDays === "number" && Number.isFinite(req.ttlDays) ? req.ttlDays : 30,
+    problem: req.problem,
+    resolution: req.resolution,
+    ...(req.sourceRunId !== undefined ? { sourceRunId: req.sourceRunId } : {}),
+  };
+  try {
+    await addEntry(entry, { repoDir: KNOWLEDGE_REPO });
+  } catch (e) {
+    return { status: 500, body: { error: `knowledge save failed: ${(e as Error).message}` } };
+  }
+  return { status: 201, body: { id: entry.id } };
+}
+
+// GET /knowledge -> lista de entries con su freshness verdict por entry (para
+// que el agente consulte "¿qué se sabe / sigue vigente?"). Con ?format=okf
+// devuelve el index.md crudo del repo de conocimiento.
+export async function handleListKnowledge(format?: string): Promise<HandlerResult> {
+  if (format === "okf") {
+    const md = await getKnowledgeIndexMarkdown({ repoDir: KNOWLEDGE_REPO });
+    if (md == null) return { status: 404, body: { error: "knowledge index not generated yet" } };
+    return { status: 200, body: md };
+  }
+  const entries = await listEntries({ repoDir: KNOWLEDGE_REPO });
+  return { status: 200, body: { entries } };
+}
+
+// GET /knowledge/:id -> el doc OKF (markdown) + el record (con freshness).
+export async function handleGetKnowledge(id: string): Promise<HandlerResult> {
+  const got = await getEntry({ repoDir: KNOWLEDGE_REPO, id });
+  if (got == null) return { status: 404, body: { error: `knowledge not found: ${id}` } };
+  return { status: 200, body: { markdown: got.markdown, record: got.record } };
+}
+
+// HTTP body for POST /knowledge/:id/attest. Vigencia humana: `by` firma y
+// `expiresAt` fija hasta cuándo es válida la attestation.
+export interface AttestKnowledgeRequest {
+  by: string;
+  expiresAt: string;
+}
+
+// POST /knowledge/:id/attest -> attestEntry (vigencia humana). Devuelve { ok }.
+export async function handleAttestKnowledge(id: string, req: AttestKnowledgeRequest): Promise<HandlerResult> {
+  if (!req || typeof req.by !== "string" || !req.by) {
+    return { status: 400, body: { error: "by is required" } };
+  }
+  if (typeof req.expiresAt !== "string" || !req.expiresAt) {
+    return { status: 400, body: { error: "expiresAt is required" } };
+  }
+  try {
+    const r = await attestEntry({ repoDir: KNOWLEDGE_REPO, id, by: req.by, expiresAt: req.expiresAt });
+    if (!r.ok) return { status: 404, body: { error: `knowledge not found: ${id}` } };
+    return { status: 200, body: { ok: true } };
+  } catch (e) {
+    return { status: 500, body: { error: `attest failed: ${(e as Error).message}` } };
   }
 }
 

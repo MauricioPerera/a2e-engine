@@ -107,8 +107,32 @@ contract:
 
 ---
 
+## Refinamiento — patrón `examples/okf-integration` (CCDD repo)
+
+El repo CCDD trae un POC `okf-integration` que demuestra OKF + CCDD como **complementos duales** y añade una **tercera capa de governance** que adoptamos:
+
+### a) Políticas como docs OKF (el "seam" dual)
+En vez de un `policies.txt` opaco, las políticas van como **`policies/*.md` OKF** (`type: Policy` en frontmatter) que **a la vez** son el slot CCDD `policies` (protegido/firmado). Un mismo archivo es concepto OKF (legible/versionado/navegable por agente y humano) **y** slot CCDD (firmado, gateado). Sin modificar ninguna spec — OKF §9 permite frontmatter desconocido. Refactor: el slot `policies` apunta a `policies/` (dir OKF), no a un txt.
+
+### b) Freshness / Vigencia — "¿sigue siendo verdad?"
+Ni OKF (timestamps opcionales) ni CCDD (firmas de contenido, no de recencia) responden si el conocimiento **sigue vigente**. El POC lo resuelve con dos mecanismos que aplicamos a TODOS nuestros artefactos OKF (catálogo, flows, runs, conocimiento):
+- **Freshness automático (`freshness.yaml` + check):** TTL por tipo de contenido. Ej.: una entrada de catálogo caduca a los N días (AP pudo cambiar la piece); un run viejo se archiva; un postmortem se marca "revisar".
+- **Vigencia humana (`attestations.json` + attest):** liga el juicio de un **humano** a un SHA-256 con fecha de expiración. Para la verdad no-automatizable (¿este aprendizaje del knowledge base sigue valiendo? ¿este catálogo/tier sigue confiable?). **Es el mecanismo concreto del "review/attestation" que pusimos en el estándar de seguridad** (`ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md` §6/§7).
+- **`log.md`** (archivo reservado OKF) como audit trail dentro de cada bundle OKF, complementando git.
+
+### El stack de governance resultante (4 capas)
+1. **OKF+git** — estructura/almacenamiento (catálogo, flows, runs, conocimiento). *Construyéndose.*
+2. **CCDD** — integridad de contexto + budgets (este contrato). *Redactado.*
+3. **Freshness** — TTL automático por tipo. *A implementar (patrón okf-integration).*
+4. **Vigencia** — attestation humana con expiración. *A implementar.*
+
+Caveat: los scripts del POC son Python (freshness/attest). Integración: correrlos en CI/governance o portar el subset; el formato (`freshness.yaml`, `attestations.json`, frontmatter con TTL) es reutilizable directo.
+
+---
+
 ## Recomendación de orden
 
-1. **L1/L2 primero:** versionar este `context.yaml` + slots firmados + el gate CCDD en CI → el estándar de seguridad se vuelve enforceable ya, sin tocar el runtime.
+1. **L1/L2 primero:** versionar este `context.yaml` + **políticas como `policies/*.md` OKF firmados** + el gate CCDD en CI → el estándar de seguridad se vuelve enforceable ya, sin tocar el runtime.
 2. **Luego el provider `okf_catalog`** (retriever estructural con budget) → resuelve el catálogo-en-contexto.
-3. **L3 (runtime assembly)** cuando quieras que la app ensamble el contexto respetando el contrato en cada llamada.
+3. **Capa freshness/vigencia** sobre los artefactos OKF (catálogo + flows + runs + conocimiento): `freshness.yaml` con TTL por tipo + `attestations.json` para vigencia humana. Cierra el problema de "conocimiento que caduca".
+4. **L3 (runtime assembly)** cuando quieras que la app ensamble el contexto respetando el contrato en cada llamada.
