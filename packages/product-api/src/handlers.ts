@@ -422,21 +422,23 @@ function pieceStepPieceNames(req: ExecuteRequest): string[] {
 }
 
 function buildValidationCatalog(req: ExecuteRequest): CatalogPiece[] {
+  // UNION de fuentes de actions: demoPieces (custom bundled) OR full-catalog
+  // (action.md). Antes, si una piece estaba en demoPieces se usaba SOLO su set
+  // (recortado) y se ignoraba el full-catalog -> el agente descubría actions vía
+  // retrieve_actions (que lee full-catalog) que /execute luego rechazaba falsamente.
+  // Ahora: una action existe si la lista demoPieces.actions O los action.md del
+  // full-catalog de esa piece. Cualquiera que retrieve_actions liste, se acepta.
   const catalog: CatalogPiece[] = [];
   for (const pn of pieceStepPieceNames(req)) {
     const demo = demoPiecesByName.get(pn);
-    if (demo) {
-      catalog.push({
-        name: pn,
-        actions: Object.values(demo.actions).map((a) => ({ name: a.name })),
-      });
-      continue;
+    const fcActions = loadPieceActions(pn); // ActionDetail[] | null (cached)
+    const names = new Set<string>();
+    if (demo) Object.values(demo.actions).forEach((a) => names.add(a.name));
+    if (fcActions) fcActions.forEach((a) => names.add(a.name));
+    if (names.size > 0) {
+      catalog.push({ name: pn, actions: [...names].map((n) => ({ name: n })) });
     }
-    const actions = loadPieceActions(pn); // ActionDetail[] | null (cached)
-    if (actions) {
-      catalog.push({ name: pn, actions: actions.map((a) => ({ name: a.name })) });
-    }
-    // no demo ni full-catalog -> se omite -> piece-not-found
+    // ni demo ni full-catalog -> se omite -> piece-not-found (detección real)
   }
   return catalog;
 }
