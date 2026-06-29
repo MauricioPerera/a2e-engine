@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { discoverSource } from "./discover.js";
 import { validatePieceDir } from "../../piece-sdk/src/validate-from-dir.js";
+import type { CapabilityManifest } from "../../piece-sdk/src/piece-sdk.ts";
 import { generateOkfCatalog } from "../../okf-generator/src/okf-generator.js";
 import { buildPiece } from "../../engine-adapter/build-piece.mjs";
 import type {
@@ -245,6 +246,40 @@ function expandHome(p: string): string {
   return p;
 }
 
+// Lee <pieceDir>/piece-manifest.json y lo mapea al CapabilityManifest que espera
+// validatePiece. Si el archivo no existe o no parsea, devuelve undefined (la
+// validacion tratara a la piece como "no declarada": executesCode -> error, como
+// antes). El JSON on-disk ya usa el shape del SDK (network.egress, executesCode,
+// readsEnv, readsFiles, auth); se construye el manifest de forma defensiva
+// descartando campos de tipo incorrecto para no ensuciar la validacion.
+function readCapabilityManifest(pieceDir: string): CapabilityManifest | undefined {
+  const manifestPath = path.join(pieceDir, "piece-manifest.json");
+  if (!existsSync(manifestPath)) return undefined;
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  const manifest: CapabilityManifest = {};
+  if (typeof json.executesCode === "boolean") manifest.executesCode = json.executesCode;
+  if (typeof json.readsEnv === "boolean") manifest.readsEnv = json.readsEnv;
+  if (typeof json.readsFiles === "boolean") manifest.readsFiles = json.readsFiles;
+  const auth = json.auth;
+  if (
+    auth === "OAUTH2" || auth === "SECRET_TEXT" || auth === "CUSTOM_AUTH" ||
+    auth === "BASIC_AUTH" || auth === "NONE"
+  ) {
+    manifest.auth = auth;
+  }
+  const net = json.network as { egress?: unknown } | undefined;
+  if (net && Array.isArray(net.egress)) {
+    const egress = net.egress.filter((h): h is string => typeof h === "string");
+    if (egress.length > 0) manifest.network = { egress };
+  }
+  return Object.keys(manifest).length > 0 ? manifest : undefined;
+}
+
 // Build una piece + extrae su metadata DENTRO de un sandbox bwrap (T2_SANDBOX=1):
 // delega a scripts/sandbox-build.sh en modo "process", que corre sandbox-process.mjs
 // (node + esbuild confinados, sin red, FS minimo). sandbox-process.mjs hace TANTO
@@ -322,7 +357,8 @@ export async function buildSelectedPieces(
       continue;
     }
     if (doValidate) {
-      const vr = validatePieceDir(absDir);
+      const manifest = readCapabilityManifest(absDir);
+      const vr = validatePieceDir(absDir, manifest);
       if (!vr.ok) {
         rejected.push({ name, reason: "validation-failed", findings: vr.findings });
         continue;
