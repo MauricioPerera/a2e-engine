@@ -272,11 +272,28 @@ export function handleCatalog(): HandlerResult {
   return { status: 200, body: root.content };
 }
 
-// GET /pieces/:name -> that piece's index.md markdown, or 404.
+// GET /pieces/:name -> doc de la piece (index.md markdown) listando TODAS sus
+// actions = UNION de full-catalog (action.md) + demoPieces. Base del doc:
+//   - full-catalog/<name>/index.md si existe (pieces community + doc curado), o
+//   - el index.md generado desde demoPieces (catalogByPath) si no.
+// La sección "## Actions" se reemplaza por la union renderizada, así una piece
+// custom (textkit/echo, sólo en demoPieces) lista sus actions y NO da 404, y
+// @activepieces/piece-json lista las 4 (no sólo la 1 que demoPieces registra).
+// 404 claro si la piece no está en NINGUNA fuente.
 export function handlePiece(name: string): HandlerResult {
-  const file = catalogByPath.get(`${name}/index.md`);
-  if (!file) return { status: 404, body: { error: `piece not found: ${name}` } };
-  return { status: 200, body: file.content };
+  const union = unionPieceActions(name);
+  const fcIndex = readFullCatalogIndex(name);
+  const demoFile = catalogByPath.get(`${name}/index.md`);
+  const base = fcIndex ?? demoFile?.content ?? null;
+  if (!base && (!union || union.length === 0)) {
+    return { status: 404, body: { error: `piece not found: ${name}` } };
+  }
+  if (!union || union.length === 0) {
+    // sin actions en ninguna fuente pero hay base (ej. piece sólo con triggers)
+    return { status: 200, body: base };
+  }
+  const doc = spliceActionsSection(base ?? "", renderActionsSection(name, union));
+  return { status: 200, body: doc };
 }
 
 // --- okf_catalog provider: retriever estructural acotado a budget ---------------------
@@ -368,18 +385,123 @@ function loadPieceActions(pieceName: string): ActionDetail[] | null {
   return actions;
 }
 
+// Convierte una action del schema demo (PieceMetadataInput) a ActionDetail, el
+// mismo shape que parseActionMd devuelve para los action.md del full-catalog.
+// Así las dos fuentes se pueden unir en una sola lista homogénea.
+function demoActionToDetail(a: {
+  name: string;
+  displayName?: string;
+  description?: string;
+  props?: Record<string, { type: string; required: boolean; description?: string }>;
+}): ActionDetail {
+  const props = a.props
+    ? Object.entries(a.props).map(([name, p]) => ({
+        name,
+        type: p.type,
+        required: p.required,
+        ...(p.description ? { description: p.description } : {}),
+      }))
+    : undefined;
+  return {
+    name: a.name,
+    description: a.description ?? "",
+    ...(a.displayName ? { displayName: a.displayName } : {}),
+    ...(props ? { props } : {}),
+  };
+}
+
+// UNION de las actions de una piece desde las dos fuentes que conoce el producto:
+//   - full-catalog (action.md via loadPieceActions): pieces community + las que
+//     tengan doc curado.
+//   - demoPieces (pieces custom bundled: json, echo-auth, textkit): actions vía
+//     piece.actions con sus props/required reales.
+// Devuelve una lista dedupeda por nombre, prefiriendo la entrada MÁS COMPLETA
+// (más props; empate por descripción más larga; empate -> full-catalog). Así una
+// pieza custom que SÓLO está en demoPieces (echo, textkit sin action.md) sigue
+// siendo descubrible por retrieve_actions sin entrada manual en full-catalog, y
+// una pieza community sólo en full-catalog se lista igual. null si la piece no
+// aparece en NINGUNA fuente (-> 404 claro, sin falsos vacíos).
+function unionPieceActions(pieceName: string): ActionDetail[] | null {
+  const byName = new Map<string, ActionDetail>();
+  const fc = loadPieceActions(pieceName);
+  if (fc) for (const a of fc) byName.set(a.name, a);
+  const demo = demoPiecesByName.get(pieceName);
+  if (demo) {
+    for (const a of Object.values(demo.actions)) {
+      const detail = demoActionToDetail(a);
+      const cur = byName.get(a.name);
+      if (!cur) {
+        byName.set(a.name, detail);
+        continue;
+      }
+      const curProps = cur.props?.length ?? 0;
+      const newProps = detail.props?.length ?? 0;
+      if (
+        newProps > curProps ||
+        (newProps === curProps && detail.description.length > cur.description.length)
+      ) {
+        byName.set(a.name, detail);
+      }
+    }
+  }
+  if (byName.size === 0) return null;
+  return [...byName.values()];
+}
+
+// Lee el index.md de una piece del full-catalog (null si no existe). Es la base
+// del doc de get_piece para pieces community y las que tienen doc curado.
+function readFullCatalogIndex(pieceName: string): string | null {
+  const p = path.join(fullCatalogDir(), pieceName, "index.md");
+  try {
+    if (!existsSync(p)) return null;
+    return readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+// Renderiza la sección "## Actions" en el mismo formato que el index.md curado
+// del full-catalog y que generateOkfCatalog emiten: una línea por action con
+// enlace al action.md y la descripción. Vacío -> _None._
+function renderActionsSection(pieceName: string, actions: ActionDetail[]): string {
+  if (actions.length === 0) return "## Actions\n\n_None._\n";
+  const lines = actions.map(
+    (a) =>
+      `- [${a.displayName ?? a.name}](/${pieceName}/actions/${a.name}.md) — ${a.description}`,
+  );
+  return `## Actions\n\n${lines.join("\n")}\n`;
+}
+
+// Reemplaza el bloque "## Actions" de un index.md base por la sección renderizada
+// (la UNION de actions). Conserva el resto del doc (frontmatter, metadata,
+// triggers). Si el base no tiene "## Actions", la inserta antes de "## Triggers"
+// o al final. Devuelve el doc reconstruido.
+function spliceActionsSection(base: string, actionsSection: string): string {
+  const startIdx = base.indexOf("## Actions");
+  if (startIdx === -1) {
+    const trigIdx = base.indexOf("## Triggers");
+    if (trigIdx !== -1) return base.slice(0, trigIdx) + actionsSection + "\n" + base.slice(trigIdx);
+    return base.endsWith("\n") ? base + actionsSection : base + "\n" + actionsSection;
+  }
+  const nextHeaderRel = base.indexOf("\n## ", startIdx + 1);
+  const endIdx = nextHeaderRel === -1 ? base.length : nextHeaderRel;
+  return base.slice(0, startIdx) + actionsSection + base.slice(endIdx);
+}
+
 // NIVEL 2: las actions DE UNA piece (con props), filtradas por query y acotadas
-// a su propio budget. Parsea solo los action.md de ESA piece del full-catalog.
+// a su propio budget. Lista la UNION de full-catalog (action.md) + demoPieces
+// (pieces custom bundled), así una pieza custom que SÓLO está en demoPieces
+// (echo, textkit) es descubrible por retrieve_actions sin action.md manual.
 // GET /catalog/pieces/:name/actions?q=&budget= -> { context, included, total, omitted, estimatedTokens }.
-// 404 claro si la piece no existe en el full-catalog.
+// 404 claro si la piece no existe en NINGUNA fuente.
 export function handlePieceActions(
   name: string,
   query: string | undefined,
   budget: number | undefined,
 ): HandlerResult {
-  const actions = loadPieceActions(name);
+  const actions = unionPieceActions(name);
   if (!actions) {
-    return { status: 404, body: { error: `piece not found in full-catalog: ${name}` } };
+    return { status: 404, body: { error: `piece not found: ${name}` } };
   }
   const maxTokens = budget && budget > 0 ? budget : 2000;
   const hasQuery = query !== undefined && query.trim().length > 0;

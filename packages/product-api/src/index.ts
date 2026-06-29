@@ -13,12 +13,13 @@ const engineAdapter = path.resolve(__dirname, '../../engine-adapter');
 const JSON_PIECES = path.join(engineAdapter, 'custom-pieces');
 const ECHO_PIECES = path.join(engineAdapter, 'custom-pieces-echo/dist');
 const HOOK_PIECES = path.join(engineAdapter, 'custom-pieces-hook/dist');
+const TEXTKIT_PIECES = path.join(engineAdapter, 'custom-pieces-textkit/dist');
 
 export function configureEngineEnv(): void {
   process.env.AP_EXECUTION_MODE = process.env.AP_EXECUTION_MODE ?? 'UNSANDBOXED';
   process.env.AP_PAUSED_FLOW_TIMEOUT_DAYS = process.env.AP_PAUSED_FLOW_TIMEOUT_DAYS ?? '1';
   process.env.AP_CUSTOM_PIECES_PATHS =
-    process.env.AP_CUSTOM_PIECES_PATHS ?? [JSON_PIECES, ECHO_PIECES, HOOK_PIECES].join(':');
+    process.env.AP_CUSTOM_PIECES_PATHS ?? [JSON_PIECES, ECHO_PIECES, HOOK_PIECES, TEXTKIT_PIECES].join(':');
 }
 
 export const PRODUCT_PORT = Number(process.env.PORT ?? '8080');

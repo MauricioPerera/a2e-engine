@@ -67,4 +67,35 @@ export const demoPieces: PieceMetadataInput[] = [
     },
     triggers: {},
   },
+  {
+    name: '@automators/piece-textkit',
+    displayName: 'TextKit',
+    description: 'Small text-transform toolkit (reverse, etc.) with no auth.',
+    version: '0.1.0',
+    categories: ['CORE'],
+    authors: ['myorg'],
+    actions: {
+      reverse_text: {
+        name: 'reverse_text',
+        displayName: 'Reverse Text',
+        description: 'Reverse the characters of the input text.',
+        requireAuth: false,
+        audience: 'both',
+        aiMetadata: {
+          description:
+            'Reverse the characters of the input text (prop "text"). No auth, no network; idempotent pure transform.',
+          idempotent: true,
+        },
+        props: {
+          text: {
+            type: 'LONG_TEXT',
+            displayName: 'Text',
+            description: 'The text whose characters will be reversed.',
+            required: true,
+          },
+        },
+      },
+    },
+    triggers: {},
+  },
 ];
