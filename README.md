@@ -1,22 +1,47 @@
-# Producto A2E (Agent to Execution) — README maestro
+# A2E — Agent to Execution
 
-**Qué es:** un motor API-only (sin UI) donde un **agente compone y ejecuta workflows** reutilizando código validado (pieces de Activepieces), **sin escribir código**. Implementación de referencia del protocolo A2E.
+**Qué es:** un motor API-only (sin UI) donde un **agente compone y ejecuta workflows** reutilizando código validado (pieces de Activepieces), **sin escribir código**. Implementación de referencia del protocolo A2E. El humano pasa de **autor a auditor**: la creatividad del agente vive en la composición; la corrección, en las primitivas validadas y el runtime.
 
 **Marca:** Automators.work · **Namespace:** `@automators` · **Licencia:** MIT (deriva de Activepieces MIT — ver `NOTICE.md`).
 
 **Ubicación del código:** `~/product` (WSL, ext4 — el engine solo corre ahí). Monorepo AP de origen en `~/ap`.
 
----
+> **Premisa:** el agente no escribe código; compone workflows declarativos (JSON) sobre piezas ya validadas y los ejecuta. Reusa paquetes MIT de Activepieces (motor de ejecución + framework de pieces). **No es un fork**; es un motor nuevo que aprovecha esas partes.
 
-## 1. Premisa A2E
-
-> El agente no escribe código. Escribe workflows que componen código ya validado (pieces). La corrección vive en las primitivas validadas y el runtime; la creatividad del agente, en la composición.
-
-Spec completa: `ESPECIFICACION-A2E.md`.
+Spec completa: `docs/ESPECIFICACION-A2E.md`.
 
 ---
 
-## 2. Estado — feature matrix (todo verificado)
+## 1. Arquitectura (componentes reales en `packages/`)
+
+El engine de Activepieces se **bundlea con esbuild** (`engine-adapter/build-engine.mjs` → `dist/engine.cjs`) aliando `@activepieces/*` a `~/ap/packages/*/src`, y se **ejecuta in-process** via `flowExecutor` (`execute-flow.cjs`). **Sin socket, sin fork, sin isolated-vm** — solo pieces, sin nodo `code`. Catálogo de **710 conectores** (`full-catalog/`, gitignored).
+
+Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-API.md`.
+
+| Paquete | Rol |
+|---|---|
+| `engine-adapter` | `build-engine.mjs` (bundle esbuild → `dist/engine.cjs`), `execute-flow.cjs` (flowExecutor in-process), `build-piece.mjs` (bundler genérico), `gen-full-catalog.ts`+`load-one-piece.mjs`, `full-catalog/` (710 pieces), pieces propias (`@automators/piece-*`) |
+| `okf-retriever` | descubrimiento por **OKF** (Open Knowledge Format: markdown+frontmatter+index, navegación estructural, **sin vectores/RAG**). Retriever de **dos niveles** acotado por budget: nivel piece (índice) + nivel actions dentro de la piece. Medido: volcado naive ~435K tokens vs provider ~3K (reducción ~124x) → la saturación de contexto **no es riesgo real**. Provider `okf_catalog`. |
+| `okf-generator` | `generateOkfCatalog(pieces)` → catálogo OKF (markdown+frontmatter); muestra todas las actions |
+| `backend-mock` | credenciales en **Vault cifrado (AES-256-GCM)** + SQLite durable (`node:sqlite`). El motor los pide por HTTP a `internalApiUrl` → backend-mock (vault + KV + files). Sobrevive a reinicios (`DATA_DIR`). |
+| `flow-builder` | construye el flow AP desde el request del agente (`buildFlowFromRequest`, `buildPieceStep`, `buildRouterStep` con 24 operadores, `buildLoopStep`, `connectionRef`, `validateActionInput`). Incluye **`sanitize-steps`** (auto-sanitiza nombres de paso inválidos + reescribe refs) y **validación pre-flight** (`validate-workflow.ts` + `validate-workflow-context.ts`: step names, refs entre pasos, existencia piece/action, props requeridas). |
+| `context-assembler` | `assembleContext(slots, {totalBudget})` + guardrails — **L3 runtime assembly**: ensambla el contexto del agente según el contrato CCDD (no-secrets, output-schema, connection-refs). |
+| `connection-provider` | `renderConnectionRefs` — provider `connection_refs`: referencias del vault, **nunca secretos** |
+| `contract/` (fuera de `packages/`) | contrato CCDD firmado: `context.yaml` (budget) L1/L2/L3, slots + `policies/*.md` OKF + expected-hashes.json. Governance del contexto que se arma para el agente. Gate CI L1/L2 en `.github/workflows/ccdd-gate.yml`. |
+| `piece-sdk` | validar + testear pieces (`smoke-validate-piece.mjs`, `smoke-test-piece.mjs`); crear pieces propias en **catálogos aislados**. |
+| `piece-source-manager` | clonar pieces de un repo (total/parcial) o crear propias (`discover.ts`: fase segura SIN ejecutar ni bundlear — solo clona/lee + parsea). Build de pieces **no confiables en SANDBOX bwrap** (`build-source.ts`: sin red, FS confinado, límites CPU/mem) — bundle **y** extracción de metadata dentro del sandbox. |
+| `run-logger` | `run-store.ts` — cada ejecución como `run-<id>.md` OKF + commit git; endpoints `/runs` (audit/reproduce). |
+| `workflow-registry` | `workflow-store.ts` — workflows como OKF+git (guardar/descubrir/re-ejecutar, versionado). |
+| `knowledge-base` | `knowledge-store.ts` — aprendizajes OKF+git con freshness TTL + vigencia humana (`attestEntry`); bucle run-failure→stub. |
+| `trigger-runtime` | `dedup.ts`, `poll-runner.ts` (`startReactivePoll` + modo cron), `cron.ts` (`nextRun`), `cursor-store.ts` (Memory/File durable). |
+| `product-api` | servidor HTTP (`node:http`, `:8080`; mock backend interno `:3997`). Ver §3. |
+| `a2e-mcp-server` | servidor **MCP** (stdio, `@modelcontextprotocol/sdk`) con **11 tools** que envuelven los endpoints del product-api. Ver §5. |
+
+**Stack de governance (4 capas):** OKF+git (catálogo·flows·runs·conocimiento) · CCDD (contrato firmado + gate) · freshness (TTL) · vigencia (attestation humana). Ver `docs/ESPECIFICACION-A2E.md`, `docs/ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md`, `docs/CONTRATO-CCDD-A2E.md`.
+
+---
+
+## 2. Estado — feature matrix (verificado)
 
 | Capacidad | Componente | Estado |
 |---|---|---|
@@ -26,12 +51,14 @@ Spec completa: `ESPECIFICACION-A2E.md`.
 | Iteración (loop sobre items) | flow-builder `buildLoopStep` | ✅ |
 | Paso de datos entre pasos `{{step.output}}` | engine-adapter `collectStepNames` | ✅ |
 | Validación de inputs del agente | flow-builder `validateActionInput` | ✅ |
-| Credenciales por referencia (vault cifrado) | backend-mock `Vault` (AES-256-GCM) | ✅ |
-| Descubrimiento OKF (sin RAG) — **710 conectores** | okf-generator + full-catalog | ✅ |
+| Validación pre-flight (step names, refs, piece/action, props req) | flow-builder `validate-workflow*` + `sanitize-steps` | ✅ |
+| Credenciales por referencia (vault cifrado AES-256-GCM) | backend-mock `Vault` | ✅ |
+| Descubrimiento OKF (sin RAG) — 710 conectores | okf-generator + full-catalog | ✅ |
 | Ejecución reactiva — polling con cron real | trigger-runtime `cron.ts` | ✅ |
 | Ejecución reactiva — webhooks | product-api `/webhooks/:id` | ✅ |
 | Dedup con cursor durable | trigger-runtime `FileCursorStore` | ✅ |
 | API HTTP del producto | product-api | ✅ |
+| **Servidor MCP** (11 tools, stdio, LM Studio) | a2e-mcp-server | ✅ |
 | **Run history** (OKF+git, audit/reproduce) | run-logger | ✅ |
 | **Registro de workflows** (guardar/descubrir/re-ejecutar, versionado) | workflow-registry | ✅ |
 | **Base de conocimiento** (freshness TTL + vigencia humana) | knowledge-base | ✅ |
@@ -39,95 +66,162 @@ Spec completa: `ESPECIFICACION-A2E.md`.
 | **Provider `connection_refs`** (referencias del vault, sin fuga) | connection-provider | ✅ |
 | **Contrato CCDD** (slots firmados + gate CI L1/L2) | `contract/` + `.github/workflows/ccdd-gate.yml` | ✅ |
 | **L3 — runtime assembly** (contrato→contexto acotado+guardrails) | context-assembler + `POST /agent/context` | ✅ |
+| **Catálogos aislados + sandbox bwrap** (build de pieces no confiables) | piece-sdk + piece-source-manager | ✅ |
 | **Backend durable** (vault/store/files sobreviven reinicio) | backend-mock `Durable*` (env `DATA_DIR`) | ✅ |
-| Auth por API-key (en progreso) | product-api (env `API_KEYS`) | 🔄 |
-
-**Stack de governance (4 capas):** OKF+git (catálogo·flows·runs·conocimiento) · CCDD (contrato firmado + gate) · freshness (TTL) · vigencia (attestation humana). Ver `ESPECIFICACION-A2E.md`, `ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md`, `CONTRATO-CCDD-A2E.md`.
+| Auth por API-key | product-api (env `API_KEYS`) | ✅ |
 
 **Pendiente (opcional):** escaneo SCA sobre el set final de pieces; backend durable a DB/Redis/S3 (hoy file-backed); L3 parseo real de `context.yaml`.
 
 ---
 
-## 3. Arquitectura de integración (Camino A — validado)
+## 3. API HTTP (`product-api`)
 
-El engine de Activepieces se **bundlea con esbuild** (`build-engine.mjs` → `dist/engine.cjs`) aliando `@activepieces/*` a `~/ap/packages/*/src`, y se **importa in-process**. SIN socket, SIN fork, SIN isolated-vm (solo pieces, sin code node).
-
-- `flowExecutor.execute({action, executionState, constants})` ejecuta el flow.
-- `triggerHookOperation.execute(...)` ejecuta hooks de trigger (TEST/RUN/ON_ENABLE).
-- Connections/store/files: el engine los pide por HTTP a `internalApiUrl` → **backend-mock** (vault + KV + files).
-
-Detalle técnico y mecanismo del piece-loader: `ANEXO-ARQUITECTURA-MOTOR-API.md`.
-
----
-
-## 4. Paquetes (`~/product/packages`)
-
-| Paquete | Rol |
-|---|---|
-| `okf-generator` | `generateOkfCatalog(pieces)` → catálogo OKF (markdown+frontmatter); muestra todas las actions |
-| `flow-builder` | `buildFlowFromRequest`, `buildPieceStep`, `buildRouterStep`, `buildLoopStep`, `connectionRef`, `validateActionInput` |
-| `backend-mock` | `Vault` (cifrado), `MemoryStore`, `MemoryFileStore`, `createServer` → endpoints `v1/worker/*` que el engine consume |
-| `engine-adapter` | `build-engine.mjs` (bundle), `execute-flow.cjs`, `build-piece.mjs` (bundler genérico de pieces), `gen-full-catalog.ts`+`load-one-piece.mjs`, `full-catalog/` (710 pieces), pieces propias (`@automators/piece-*`) |
-| `trigger-runtime` | `dedup.ts` (`selectNewItems`), `poll-runner.ts` (`startReactivePoll` + modo cron), `cron.ts` (`nextRun`), `cursor-store.ts` (Memory/File) |
-| `run-logger` | `run-store.ts` — cada ejecución como `run-<id>.md` OKF + commit git; endpoints `/runs` |
-| `workflow-registry` | `workflow-store.ts` — workflows como OKF+git (guardar/descubrir/re-ejecutar, versionado) |
-| `knowledge-base` | `knowledge-store.ts` — aprendizajes OKF+git con freshness TTL + vigencia (`attestEntry`); bucle run-failure→stub |
-| `okf-retriever` | `retrieve(pieces, query, {maxTokens})` — provider `okf_catalog`: catálogo acotado a budget, estructural (sin RAG) |
-| `connection-provider` | `renderConnectionRefs` — provider `connection_refs`: referencias del vault, nunca secretos |
-| `context-assembler` | `assembleContext(slots, {totalBudget})` + guardrails — L3 runtime assembly |
-| `product-api` | servidor HTTP (node:http) que ata todo; arranca el mock interno; auth por `API_KEYS` |
-
-**Fuera de `packages/`:** `contract/` (contrato CCDD firmado: context.yaml + slots + `policies/*.md` OKF + expected-hashes.json) · `.github/workflows/ccdd-gate.yml` (gate L1/L2).
-
----
-
-## 5. API HTTP (product-api)
+Arranca el mock interno y escucha en `:8080`. Auth por **API key** (`X-API-Key`); abierto en dev si `API_KEYS` no está configurado. Todas las rutas salvo `POST /webhooks/:id` exigen `X-API-Key` cuando `API_KEYS` está seteado.
 
 ```
-GET  /catalog                      → índice OKF de pieces (descubrimiento)
-GET  /pieces/:name                 → OKF de una piece (actions/triggers/props)
-POST /execute                      → { steps:[...] } → ejecuta; valida inputs (400 si inválido)
-POST /triggers                     → registra trigger POLLING reactivo → { triggerId }
-GET  /triggers/:id                 → estado + fired log
-DELETE /triggers/:id               → detiene el loop
-POST /webhook-triggers             → registra trigger WEBHOOK → { triggerId, webhookUrl }
-GET/DELETE /webhook-triggers/:id   → estado / baja
-POST /webhooks/:triggerId          → ingress: el evento dispara el flow (no requiere API-key)
-GET  /catalog/retrieve?q=&budget=  → subconjunto del catálogo acotado a budget (provider okf_catalog)
-GET  /connections?projectId=&format= → referencias de credenciales (nunca secretos)
+GET  /catalog                                  → índice OKF de pieces (descubrimiento)
+GET  /catalog/retrieve?q=&budget=&mode=        → subconjunto del catálogo acotado a budget (provider okf_catalog)
+GET  /catalog/pieces?q=&budget=                → lista de pieces acotada a budget
+GET  /catalog/pieces/:name/actions             → actions de una piece (recorta a esa piece del full-catalog)
+GET  /pieces/:name                             → OKF de una piece (actions/triggers/props)
+POST /execute                                  → { steps:[...] } → ejecuta; validación pre-flight (400 si inválido)
+POST /workflows/validate                       → valida un workflow sin ejecutarlo
 POST /workflows · GET /workflows · GET /workflows/:id · POST /workflows/:id/execute  → registro de workflows
-GET  /runs · GET /runs/:date/:runId                    → run history (OKF+git)
-POST /knowledge · GET /knowledge · GET /knowledge/:id · POST /knowledge/:id/attest   → base de conocimiento
-POST /agent/context                → L3: ensambla el contexto del agente según el contrato CCDD
+GET  /runs · GET /runs/:date/:runId            → run history (OKF+git)
+GET  /connections?projectId=&piece=&format=&budget=  → referencias de credenciales (nunca secretos)
+POST /knowledge · GET /knowledge · GET /knowledge/:id · POST /knowledge/:id/attest  → base de conocimiento
+POST /agent/context                            → L3: ensambla el contexto del agente según el contrato CCDD
+POST /agent/run                                → ejecuta un agente con contexto ensamblado
+POST /sources/discover                         → discovery (fase segura, sin ejecutar): lista pieces de un repo/ruta
+POST /sources/build                             → build de pieces (sandbox bwrap para no confiables)
+POST /triggers · GET /triggers/:id · DELETE /triggers/:id          → triggers POLLING reactivos
+POST /webhook-triggers · GET/DELETE /webhook-triggers/:id         → triggers WEBHOOK
+POST /webhooks/:triggerId                      → ingress: el evento dispara el flow (no requiere API-key)
 ```
 
-Todas las rutas (salvo `POST /webhooks/:id`) exigen `X-API-Key` cuando `API_KEYS` está configurado; sin esa env, modo dev abierto.
+`AP_EXECUTION_MODE` debe estar seteada (`UNSANDBOXED`) — se fija **antes** del `require` del engine (ver §4).
 
 ### Contrato del agente (ExecuteRequest)
 ```json
 { "steps": [
-  { "name":"s1", "pieceName":"@automators/piece-x", "pieceVersion":"1.0.0",
-    "actionName":"do", "input":{...}, "connection":{"name":"mi-cred"} },
-  { "name":"r1", "type":"router", "branches":[{ "name":"b", "condition":{"firstValue":"a","operator":"TEXT_EXACTLY_MATCHES","secondValue":"a"}, "steps":[...] }], "fallback":{...} },
-  { "name":"l1", "type":"loop", "items":"{{ [1,2,3] }}", "steps":[...] }
+  { "name":"s1", "pieceName":"@activepieces/piece-json", "pieceVersion":"0.7.2",
+    "actionName":"convert_text_to_json", "input":{"text":"{\"a\":5,\"b\":9}"} },
+  { "name":"s2", "pieceName":"@activepieces/piece-json", "pieceVersion":"0.7.2",
+    "actionName":"run_jsonata_query",
+    "input":{"json":"{{s1.output}}", "query":"a + b"} }
 ] }
 ```
 El agente solo emite **referencias** de credenciales (`{{connections.<name>}}`), nunca secretos.
 
 ---
 
-## 6. Cómo arrancar (en WSL)
+## 4. Cómo ejecutarlo (en WSL)
 
 ```bash
 export PATH=/home/administrador/.hermes/node/bin:$HOME/product/node_modules/.bin:$PATH
-export AP_EXECUTION_MODE=UNSANDBOXED AP_PAUSED_FLOW_TIMEOUT_DAYS=1
-cd ~/product/packages/product-api && npx tsx src/index.ts   # API en :8080, mock interno
+cd ~/product/packages/product-api && AP_EXECUTION_MODE=UNSANDBOXED npx tsx src/index.ts
+# → product-api en http://localhost:8080  (mock backend interno en :3997)
 ```
-`AP_CUSTOM_PIECES_PATHS` (separado por `:`) apunta a los roots de pieces que el loader debe resolver.
+- Si `EADDRINUSE`: `fuser -k 8080/tcp 3997/tcp` antes de reintentar.
+- `AP_CUSTOM_PIECES_PATHS` (separado por `:`) apunta a los roots de pieces que el loader debe resolver (por defecto apunta a las custom-pieces de `engine-adapter`).
+- `AP_EXECUTION_MODE` se fija **antes** del `require` del engine en `configureEngineEnv()` (`src/index.ts`); de no hacerlo, las refs inter-paso `{{stepN.output}}` no se resuelven (ver §7, fix #2).
 
 ---
 
-## 7. Legal (ver `ATRIBUCION-Y-LICENCIAS.md`)
+## 5. Integración con LM Studio (MCP)
+
+El paquete `a2e-mcp-server` expone **11 tools** sobre el product-api para que un LLM con tool-calling componga y ejecute workflows A2E, descubra pieces, liste referencias de credenciales (sin secretos) y consulte knowledge/runs — **sin escribir código ni ver secretos**.
+
+**Tools:** `retrieve_catalog`, `retrieve_pieces`, `retrieve_actions`, `get_piece`, `list_connections`, `execute_workflow`, `save_workflow`, `list_workflows`, `run_saved_workflow`, `query_knowledge`, `query_runs`.
+
+Habla **STDIO** (JSON-RPC sobre stdin/stdout). Por eso **stdout debe ser exclusivamente el transporte JSON-RPC** — cualquier log/banner en stdout rompe la conexión. Los diagnósticos van a **stderr** (`console.error`).
+
+### Setup en LM Studio
+1. **product-api debe estar corriendo en `:8080`** antes de invocar cualquier `callTool` (`listTools` no lo necesita). Si usas API keys, exportala en `run-mcp.sh` (`export A2E_API_KEY=…`) o en el bloque `env` del `mcp.json`.
+2. El **modelo debe soportar tool-calling** nativo (variantes tool de Qwen2.5/Llama 3.x). Un modelo de chat plano verá las tools pero nunca las llama.
+3. Editar `mcp.json` de LM Studio (Tools tab → "Edit mcp.json") y añadir bajo `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "a2e": {
+      "command": "wsl.exe",
+      "args": ["-d", "Ubuntu", "-e", "/home/administrador/product/packages/a2e-mcp-server/run-mcp.sh"]
+    }
+  }
+}
+```
+
+- `-d Ubuntu` selecciona la distro WSL (`wsl.exe -l -q` para listar).
+- `-e` corre el script con bash plano (**no** `-l`) para que nada de login shell contamine stdout.
+- Para pasar `A2E_API_KEY`/`A2E_API_BASE`, añade un bloque `"env"` al objeto server.
+- **Chat nuevo** tras editar `mcp.json` para que LM Studio recargue las tools.
+
+### Verificar el handshake (sin LM Studio)
+```bash
+cd ~/product/packages/a2e-mcp-server && node handshake-test.mjs
+# Esperado: ALL PASS — 11 tools, primer byte stdout = 0x7B ('{'), serverInfo = a2e-mcp-server 0.1.0
+```
+Detalle completo: `packages/a2e-mcp-server/MCP-SETUP.md`.
+
+---
+
+## 6. Convención de encadenamiento (lo que el agente debe saber)
+
+- **Referenciar el output de un paso previo** en el input de otro: `{{nombreDelPaso.output}}` (o `.output.campo`). **Nunca** hardcodear un valor que viene de otro paso.
+- **Step names** = identificadores `[A-Za-z0-9_]`. Si el agente emite un nombre inválido, `sanitize-steps` lo auto-sanitiza **y reescribe las refs** que lo citan.
+- Si una action usa un lenguaje de expresión (**JSONata**): sintaxis nativa (campos como `"a + b"`, **no** `"{{a + b}}"` ni `"$a + b"`).
+
+Estas reglas viajan en las **descripciones de las tools** del MCP, de modo que el agente las descubre al listarlas.
+
+---
+
+## 7. Demostración validada (end-to-end, agente real)
+
+Un modelo **LOCAL de 9B** (`ornith:9b`) vía LM Studio **compuso y ejecutó un workflow de 2 pasos SIN escribir código**:
+
+1. `convert_text_to_json` (piece `@activepieces/piece-json`) sobre el texto `{"a":5,"b":9}` → objeto.
+2. `run_jsonata_query` (misma piece) con `json = {{step1.output}}` y `query = "a + b"` → **output `14`**.
+
+Workflow **guardado** para reuso. El agente **descubrió → compuso → encadenó datos reales → ejecutó → persistió**, sin ver secretos, con validación en cada paso.
+
+### Endurecimiento (5 fixes destapados probando con agente real)
+
+1. **Auto-sanitize de step-names** (+ reescritura de refs que los citan) — `flow-builder/src/sanitize-steps.ts`.
+2. **Fix env load-order:** `AP_EXECUTION_MODE` seteado **antes** del `require` del engine → las refs inter-paso `{{stepN.output}}` funcionan (`product-api/src/index.ts → configureEngineEnv()`).
+3. **Discovery == execution:** la validación de existencia de actions usa el **full-catalog** (unión demo + full-catalog) → toda action discoverable por `retrieve_actions` es ejecutable por `/execute` (antes se rechazaba falsamente).
+4. **`retrieve_actions` fallback:** lista todas las actions cuando la query no coincide → **no ciega al agente**.
+5. **Validación de props requeridas** desde el full-catalog → finding accionable (`"missing required property X"`) en vez de crash críptico del engine (`actionPropsIndex` con `required:true`).
+
+---
+
+## 8. A2E vs n8n (resumen)
+
+| | n8n | A2E |
+|---|---|---|
+| Primero | humano (human-first) | agente (agent-first) |
+| El agente lo usa vía | MCP de retrofit | MCP nativo (11 tools, por diseño) |
+| Nodo `code` | sí (el agente puede escribir código SDK) | **no**, por diseño (JSON declarativo) |
+| Governance | débil (hay humano en el loop) | CCDD + sandbox + secrets-by-reference (no hay humano en el loop) |
+| UI | sí, es el centro | no existe (API-only); la UI sería un síntoma |
+
+La diferencia no es la UI — es **quién autoriza**: en A2E el humano es **auditor, no autor**, por eso la governance es estructural.
+
+---
+
+## 9. Seguridad (resumen)
+
+- **Secrets-by-reference:** el agente nunca ve secretos; referencias `{{connections.X}}` resueltas por el vault en ejecución.
+- **Vault cifrado** (AES-256-GCM) + SQLite durable; secrets **fuera de git**.
+- **Catálogos aislados**; build de pieces no confiables en **sandbox bwrap** (sin red, FS confinado, límites CPU/mem) — bundle y extracción de metadata dentro del sandbox.
+- **Validación pre-flight** antes de ejecutar (step names, refs inter-paso, existencia piece/action, props requeridas).
+- **Auth por API key** (`X-API-Key`); modo dev abierto si `API_KEYS` no está seteado.
+
+Ver `docs/ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md`.
+
+---
+
+## 10. Legal (ver `docs/ATRIBUCION-Y-LICENCIAS.md`)
 
 - `LICENSE` (MIT): `Copyright (c) 2026 Automators.work` + `Copyright (c) 2020-2024 Activepieces Inc.` (obligación MIT — preservado).
 - `NOTICE.md`: procedencia; **no** se incorpora código `ee/` (Enterprise).
@@ -137,16 +231,26 @@ cd ~/product/packages/product-api && npx tsx src/index.ts   # API en :8080, mock
 
 ---
 
-## 8. Método de construcción
+## 11. Método de construcción
 
 PM (Claude) **dirige y verifica**; toda la **implementación la escriben devs efímeros GLM-5.2** (`ollama launch claude`): lógica pura bajo **gate CCDD** determinista en Windows (tests congelados + complejidad bajo budget), e **integración acoplada al engine ejecutada por GLM en WSL**. Claude no escribe código de producción ni ejecuta.
 
 ---
 
-## 9. Documentos del proyecto (`D:\Repo\activepieces\`)
+## 12. Documentos (`docs/`)
 
-- `AUDITORIA-LICENCIAS-ACTIVEPIECES.md` — qué de Activepieces es MIT-reutilizable vs Enterprise.
-- `ANEXO-ARQUITECTURA-MOTOR-API.md` — arquitectura del motor, Camino A, piece-loader.
-- `ESPECIFICACION-A2E.md` — el protocolo A2E (premisa, garantías, contrato, enforcement).
-- `ATRIBUCION-Y-LICENCIAS.md` — LICENSE/NOTICE, checklist legal, método de auditoría de deps.
-- `README-A2E-PRODUCTO.md` — este documento.
+- `docs/ESPECIFICACION-A2E.md` — el protocolo A2E (premisa, garantías, contrato, enforcement).
+- `docs/ANEXO-ARQUITECTURA-MOTOR-API.md` — arquitectura del motor, Camino A, piece-loader.
+- `docs/ARQUITECTURA-DATOS-GOVERNANCE-A2E.md` — arquitectura de datos y governance.
+- `docs/CONTRATO-CCDD-A2E.md` — contrato CCDD firmado (slots, gate L1/L2/L3).
+- `docs/ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md` — estándar de seguridad de catálogos.
+- `docs/AUDITORIA-LICENCIAS-ACTIVEPIECES.md` — qué de Activepieces es MIT-reutilizable vs Enterprise.
+- `docs/ATRIBUCION-Y-LICENCIAS.md` — LICENSE/NOTICE, checklist legal, método de auditoría de deps.
+- `docs/README-A2E-PRODUCTO.md` — README de producto.
+
+Paquete MCP: `packages/a2e-mcp-server/README.md` y `packages/a2e-mcp-server/MCP-SETUP.md`.
+
+---
+
+**Repo:** https://github.com/MauricioPerera/a2e-engine.git
+**Commit documentado:** 48cd2dc
