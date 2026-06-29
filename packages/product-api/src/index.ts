@@ -22,12 +22,13 @@ export function configureEngineEnv(): void {
 }
 
 export const PRODUCT_PORT = Number(process.env.PORT ?? '8080');
+const BIND_ADDR = process.env.BIND_ADDR ?? '127.0.0.1';
 
 export async function start(): Promise<{ close: () => Promise<void> }> {
   configureEngineEnv();
   const mock = await startMockBackend();
   const server = createProductServer();
-  await new Promise<void>((resolve) => server.listen(PRODUCT_PORT, resolve));
+  await new Promise<void>((resolve) => server.listen(PRODUCT_PORT, BIND_ADDR, resolve));
   // eslint-disable-next-line no-console
   console.log(
     `product-api listening on http://localhost:${PRODUCT_PORT}  (mock backend on :${mock.port})`,

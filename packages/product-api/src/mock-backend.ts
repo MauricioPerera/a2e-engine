@@ -87,6 +87,6 @@ export function startMockBackend(port: number = MOCK_PORT): Promise<MockBackend>
   });
 
   return new Promise((resolve) => {
-    server.listen(port, () => resolve({ server, port }));
+    server.listen(port, '127.0.0.1', () => resolve({ server, port }));
   });
 }

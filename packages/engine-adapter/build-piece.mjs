@@ -18,7 +18,6 @@ import fs from 'fs';
 const AP_REPO = process.env.AP_REPO || path.join(os.homedir(), 'ap');
 const AP = path.join(AP_REPO, 'packages');
 const require = createRequire(import.meta.url);
-const esbuild = require(path.join(AP_REPO, 'node_modules/esbuild/lib/main.js'));
 
 const engineAliases = {
   '@activepieces/shared': path.join(AP, 'core/shared/src'),
@@ -43,6 +42,7 @@ export async function buildPiece(pieceDir, outRoot) {
   const pkgDir = path.join(outRoot, 'pieces', `${PIECE}-${VERSION}`, 'node_modules', PIECE);
   fs.mkdirSync(pkgDir, { recursive: true });
 
+  const esbuild = require(path.join(AP_REPO, 'node_modules/esbuild/lib/main.js'));
   await esbuild.build({
     entryPoints: [src],
     bundle: true,

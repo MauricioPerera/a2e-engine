@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "tsx src/server.ts",
+    "start:http": "tsx src/server-http.ts",
     "smoke": "tsx smoke-mcp.mjs"
   },
   "dependencies": {
