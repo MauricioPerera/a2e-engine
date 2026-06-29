@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { createHmac } from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = String(process.env.PORT ?? "8098");
@@ -37,6 +38,24 @@ async function http(method, pathname, body) {
       /* keep text */
     }
   }
+  return { status: res.status, body: parsed };
+}
+
+function computeSignature(secret, rawBody) {
+  const h = createHmac("sha256", secret);
+  h.update(rawBody);
+  return `sha256=${h.digest("hex")}`;
+}
+
+// POST with a RAW string body (signature is over exactly the bytes the server
+// receives) plus the X-A2E-Signature header.
+async function httpSigned(pathname, rawBody, secret) {
+  const headers = { "content-type": "application/json", "x-a2e-signature": computeSignature(secret, rawBody) };
+  const res = await fetch(`${BASE}${pathname}`, { method: "POST", headers, body: rawBody });
+  const text = await res.text();
+  let parsed = text;
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) { try { parsed = JSON.parse(text); } catch { /* keep text */ } }
   return { status: res.status, body: parsed };
 }
 
@@ -106,14 +125,16 @@ async function main() {
     });
     console.log("[smoke] POST /webhook-triggers ->", JSON.stringify(reg.body));
     if (reg.status !== 201) throw new Error(`register failed: HTTP ${reg.status}`);
-    const { triggerId, webhookUrl } = reg.body;
+    const { triggerId, webhookUrl, signingSecret } = reg.body;
     if (!triggerId || webhookUrl !== `/webhooks/${triggerId}`) {
       throw new Error(`bad registration response: ${JSON.stringify(reg.body)}`);
     }
+    if (!signingSecret) throw new Error(`registration did not return a signingSecret: ${JSON.stringify(reg.body)}`);
 
-    // 3) fire the webhook with a test payload
+    // 3) fire the webhook with a SIGNED payload (HMAC-SHA256 over the raw body).
     const payload = { hello: "world", n: 42 };
-    const fire = await http("POST", `/webhooks/${triggerId}`, payload);
+    const rawBody = JSON.stringify(payload);
+    const fire = await httpSigned(`/webhooks/${triggerId}`, rawBody, signingSecret);
     console.log("[smoke] POST /webhooks/:id ->", JSON.stringify(fire.body));
     if (fire.status !== 200) throw new Error(`ingress HTTP ${fire.status}: ${JSON.stringify(fire.body)}`);
 

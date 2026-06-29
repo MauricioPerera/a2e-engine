@@ -59,6 +59,11 @@ export interface WebhookStepSpec {
 export interface WebhookRegistration {
   triggerSpec: WebhookTriggerSpec;
   flowSteps: WebhookStepSpec[];
+  // Per-webhook HMAC secret. Generated at registration time; the emitter signs
+  // the raw body with this and the ingress verifies X-A2E-Signature against it.
+  // Undefined for legacy registrations (no secret -> signing optional/required
+  // depending on WEBHOOK_HMAC_OPTIONAL; see handleWebhookIngress).
+  signingSecret?: string;
 }
 
 export interface WebhookEntry {

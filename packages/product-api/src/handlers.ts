@@ -68,6 +68,7 @@ import {
   type WebhookStepSpec,
   type WebhookRegistration,
 } from "./trigger-registry.js";
+import { generateSecret, verifySignature } from "./webhook-hmac.js";
 import { discoverSource, type DiscoverOptions } from "../../piece-source-manager/src/discover.js";
 import { buildSelectedPieces } from "../../piece-source-manager/src/build-source.js";
 import { runAgent } from "../../agent-runtime/src/orchestrator.js";
@@ -890,6 +891,7 @@ export function handleCreateWebhookTrigger(
     }
   }
 
+  const signingSecret = generateSecret();
   const registration: WebhookRegistration = {
     triggerSpec: {
       pieceName: triggerSpec.pieceName,
@@ -898,12 +900,15 @@ export function handleCreateWebhookTrigger(
       input: triggerSpec.input ?? {},
     },
     flowSteps,
+    signingSecret,
   };
   const triggerId = randomUUID();
   registerWebhookTrigger(triggerId, registration);
+  // The signingSecret is returned ONCE here; the registrant stores it to sign
+  // future ingress payloads. It is NOT echoed by GET /webhook-triggers/:id.
   return {
     status: 201,
-    body: { triggerId, webhookUrl: `/webhooks/${triggerId}` },
+    body: { triggerId, webhookUrl: `/webhooks/${triggerId}`, signingSecret },
   };
 }
 
@@ -912,9 +917,12 @@ export function handleCreateWebhookTrigger(
 export function handleGetWebhookTrigger(id: string): HandlerResult {
   const entry = getWebhookTrigger(id);
   if (!entry) return { status: 404, body: { error: `webhook trigger not found: ${id}` } };
+  // Never echo the signingSecret on GET (it was returned once at registration).
+  const { signingSecret: _omit, ...registrationSansSecret } = entry.registration;
+  void _omit;
   return {
     status: 200,
-    body: { triggerId: id, registration: entry.registration, webhookUrl: `/webhooks/${id}` },
+    body: { triggerId: id, registration: registrationSansSecret, webhookUrl: `/webhooks/${id}` },
   };
 }
 
@@ -1013,13 +1021,29 @@ export interface WebhookIngressResult {
 // body flow once per item, return { fired, results }.
 export async function handleWebhookIngress(
   triggerId: string,
-  event: { body: unknown; headers: Record<string, string>; queryParams: Record<string, string>; method: string },
+  event: { body: unknown; headers: Record<string, string>; queryParams: Record<string, string>; method: string; rawBody: string },
 ): Promise<WebhookIngressResult> {
   const entry = getWebhookTrigger(triggerId);
   if (!entry) {
     return { status: 404, body: { error: `webhook trigger not found: ${triggerId}` } };
   }
   const { registration } = entry;
+
+  // --- HMAC signature gate -------------------------------------------------
+  // New webhooks (registered with a signingSecret) REQUIRE a valid
+  // X-A2E-Signature header over the RAW body, UNLESS WEBHOOK_HMAC_OPTIONAL=1.
+  // Legacy registrations (no secret, e.g. registered by an older route) and
+  // optional mode fall back to the original triggerId-only behavior.
+  // node:http lowercases inbound header names, so look up the lowercased key.
+  const sigHeader = event.headers["x-a2e-signature"];
+  const hasSecret =
+    typeof registration.signingSecret === "string" && registration.signingSecret.length > 0;
+  const enforce = hasSecret && process.env.WEBHOOK_HMAC_OPTIONAL !== "1";
+  if (enforce) {
+    if (!verifySignature(registration.signingSecret as string, event.rawBody, sigHeader)) {
+      return { status: 401, body: { error: "invalid_signature" } };
+    }
+  }
 
   let runRes: { response?: { output?: unknown[] } };
   try {

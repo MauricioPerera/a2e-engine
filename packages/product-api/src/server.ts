@@ -226,6 +226,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         headers,
         queryParams,
         method,
+        rawBody: raw,
       }),
     );
   }
