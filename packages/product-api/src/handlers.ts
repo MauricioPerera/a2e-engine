@@ -223,6 +223,43 @@ for (const piece of demoPieces) {
   }
 }
 
+// Resuelve las props de una action para la validación pre-flight, UNIENDO el
+// schema demo (actionPropsIndex, pieces custom bundled) con el schema del
+// full-catalog (action.md via loadPieceActions — el MISMO que retrieve_actions
+// le muestra al agente). Así cualquier action discoverable queda gateada por
+// el schema que el agente vio, y las pieces custom no presentes en el
+// full-catalog conservan su fallback al schema demo. Union, no reemplazo.
+//
+// Devuelve el Record de props si la action existe en ALGUNA fuente (aunque sea
+// vacío: action sin props), o undefined si no aparece en ninguna (no se puede
+// validar -> no se bloquea). El Record vacío se devuelve a propósito para que
+// validateActionInput siga cazando 'unknown property' como antes.
+function resolveActionProps(
+  pieceName: string,
+  actionName: string,
+): Record<string, { type: string; required: boolean }> | undefined {
+  let found = false;
+  const props: Record<string, { type: string; required: boolean }> = {};
+  const demo = actionPropsIndex.get(`${pieceName}|${actionName}`);
+  if (demo) {
+    found = true;
+    Object.assign(props, demo);
+  }
+  const fcActions = loadPieceActions(pieceName);
+  if (fcActions) {
+    const fcAction = fcActions.find((a) => a.name === actionName);
+    if (fcAction) {
+      found = true;
+      if (fcAction.props) {
+        for (const p of fcAction.props) {
+          props[p.name] = { type: p.type, required: p.required };
+        }
+      }
+    }
+  }
+  return found ? props : undefined;
+}
+
 export interface HandlerResult {
   status: number;
   body: unknown; // string => served as text/markdown; object => JSON
@@ -345,7 +382,17 @@ export function handlePieceActions(
     return { status: 404, body: { error: `piece not found in full-catalog: ${name}` } };
   }
   const maxTokens = budget && budget > 0 ? budget : 2000;
+  const hasQuery = query !== undefined && query.trim().length > 0;
   const result = retrieveActions(actions, query, { maxTokens });
+  // FALLBACK anti-ceguera: si hubo query pero el scoring no incluyó NINGUNA
+  // action (query no-coincidente, ej "all actions" que no aparece en ningún
+  // name/description), listar TODAS las actions de la piece (acotado por budget)
+  // en vez de devolver {included:[], total:0} y dejar al agente sin nombres de
+  // props. Sin query ya lista todas (comportamiento conservado); este fallback
+  // sólo dispara cuando la query matchea a nadie y la piece tiene actions.
+  if (hasQuery && result.included.length === 0 && actions.length > 0) {
+    return { status: 200, body: retrieveActions(actions, undefined, { maxTokens }) };
+  }
   return { status: 200, body: result };
 }
 
@@ -480,7 +527,7 @@ export async function handleValidateWorkflow(req: ValidateWorkflowRequest): Prom
   for (const s of flattenSteps(wfReq.steps)) {
     const ps = s as PieceStepReq;
     if (!ps.pieceName || !ps.actionName) continue;
-    const props = actionPropsIndex.get(`${ps.pieceName}|${ps.actionName}`);
+    const props = resolveActionProps(ps.pieceName, ps.actionName);
     if (!props) continue;
     const res = validateActionInput(ps.input ?? {}, props);
     if (!res.ok) {
@@ -522,14 +569,18 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
   // A2E: valida el input de cada piece step contra las props de su action ANTES
   // de construir/ejecutar. Si algún step es inválido, 400 con errores claros por
   // step y NO se ejecuta el flow. Router/loop steps (sin pieceName+actionName) y
-  // actions no indexadas se saltan (ver nota en actionPropsIndex).
+  // actions no resueltas se saltan. Las props se resuelven vía resolveActionProps
+  // (union demo + full-catalog): así toda action discoverable por retrieve_actions
+  // queda gateada por el MISMO schema que el agente vio, y una prop requerida
+  // faltante se caza aquí (400 validation_failed) ANTES de que el engine reviente
+  // con un TypeError criptico.
   const stepResults: Array<{ name: string; errors: string[] }> = [];
   if (Array.isArray(sreq.steps)) {
     for (const s of sreq.steps) {
       const ps = s as PieceStepReq;
       if (!ps.pieceName || !ps.actionName) continue; // router/loop o sin acción
-      const props = actionPropsIndex.get(`${ps.pieceName}|${ps.actionName}`);
-      if (!props) continue; // piece no indexada -> no se puede validar, no se bloquea
+      const props = resolveActionProps(ps.pieceName, ps.actionName);
+      if (!props) continue; // action no resuelta -> no se puede validar, no se bloquea
       const res = validateActionInput(ps.input ?? {}, props);
       if (!res.ok) {
         stepResults.push({
