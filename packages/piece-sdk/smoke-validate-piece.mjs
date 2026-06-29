@@ -3,7 +3,7 @@
 //  (a) our echo piece, no manifest          -> metadata ok, warn 'no-manifest'
 //  (b) same echo with a correct manifest    -> ok:true, no 'no-manifest' warn
 //  (c) community slack, manifest w/o egress -> undeclared-egress warns + detected hosts
-//  (d) synthetic source with eval(          -> ERROR 'executes-code', ok:false
+//  (d) synthetic source with eval( no manifest -> ERROR 'undeclared-executes-code', ok:false
 import { validatePieceDir } from "./src/validate-from-dir.ts";
 import { validatePiece } from "./src/piece-sdk.ts";
 
@@ -38,7 +38,8 @@ const rSlack = validatePieceDir(SLACK, slackManifest);
 dump("(c) slack / manifest {auth:OAUTH2, egress:[]}", rSlack);
 console.log(`  detected egress hosts (from source): ${JSON.stringify(rSlack.facts?.egressDomains)}`);
 
-// (d) synthetic source containing eval( — the A2E guard must fire an ERROR.
+// (d) synthetic source containing eval( with NO manifest -> the A2E guard must
+// fire ERROR 'undeclared-executes-code' (declared would be a warn; this is not).
 const synthSource =
   "const x = eval('1 + 1');\nexport const bad = () => x;\n";
 const synthMeta = {

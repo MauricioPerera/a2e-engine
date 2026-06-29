@@ -158,28 +158,39 @@ test('reconcileCapabilities: undeclared file read -> warn', () => {
   assert.ok(reconcileCapabilities(manifest, facts).some((x) => x.code === 'undeclared-file-read' && x.level === 'warn'));
 });
 
-test('reconcileCapabilities: executesCode -> ERROR always, even if declared', () => {
+test('reconcileCapabilities: executesCode DECLARED -> warn (not error), ok not blocked', () => {
   const facts = extractCodeFacts('eval("x");');
   const declared: CapabilityManifest = { executesCode: true, network: { egress: [] } };
   const f = reconcileCapabilities(declared, facts);
   const exec = f.find((x) => x.code === 'executes-code');
   assert.ok(exec);
-  assert.equal(exec!.level, 'error');
+  assert.equal(exec!.level, 'warn');
+  assert.equal(f.some((x) => x.level === 'error'), false);
 });
 
-test('reconcileCapabilities: executesCode -> ERROR even without manifest', () => {
+test('reconcileCapabilities: executesCode WITHOUT manifest -> error undeclared-executes-code', () => {
   const facts = extractCodeFacts('eval("x");');
   const f = reconcileCapabilities(undefined, facts);
-  // no-manifest warn + executes-code error
-  assert.ok(f.some((x) => x.code === 'executes-code' && x.level === 'error'));
+  // no-manifest warn + undeclared-executes-code error
+  assert.ok(f.some((x) => x.code === 'no-manifest' && x.level === 'warn'));
+  assert.ok(f.some((x) => x.code === 'undeclared-executes-code' && x.level === 'error'));
 });
 
-test('validatePiece: eval in source -> ok=false', () => {
-  const src = 'eval("1+1");';
+test('validatePiece: child_process + declares executes-code -> ok=true with warn executes-code', () => {
+  const src = 'const { execFile } = require("node:child_process");';
+  const manifest: CapabilityManifest = { executesCode: true, network: { egress: [] } };
+  const r = validatePiece(cleanMeta, src, manifest);
+  assert.equal(r.ok, true);
+  assert.ok(r.findings.some((x) => x.code === 'executes-code' && x.level === 'warn'));
+  assert.equal(r.findings.some((x) => x.level === 'error'), false);
+  assert.equal(r.facts!.executesCode, true);
+});
+
+test('validatePiece: child_process WITHOUT declaring -> ok=false with error undeclared-executes-code', () => {
+  const src = 'const { execFile } = require("node:child_process");';
   const r = validatePiece(cleanMeta, src);
   assert.equal(r.ok, false);
-  assert.ok(r.findings.some((x) => x.code === 'executes-code' && x.level === 'error'));
-  assert.ok(r.facts);
+  assert.ok(r.findings.some((x) => x.code === 'undeclared-executes-code' && x.level === 'error'));
   assert.equal(r.facts!.executesCode, true);
 });
 

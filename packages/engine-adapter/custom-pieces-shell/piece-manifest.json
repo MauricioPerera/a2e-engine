@@ -1,0 +1,4 @@
+{
+  "executesCode": true,
+  "network": { "egress": ["cdn.activepieces.com"] }
+}

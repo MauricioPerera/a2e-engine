@@ -1,6 +1,8 @@
 // Metadata of the demo pieces actually bundled & executable in this product:
 //  - @activepieces/piece-json   (convert_text_to_json)  -> custom-pieces/pieces
 //  - @automators/piece-echo-auth     (whoami, SecretText)    -> custom-pieces-echo/dist/pieces
+//  - @automators/piece-textkit   (reverse_text)          -> custom-pieces-textkit/dist/pieces
+//  - @automators/piece-shell     (run, allowlisted)      -> custom-pieces-shell/dist/pieces
 // Structurally compatible with okf-generator's PieceMetadataInput so the same
 // OKF emitter that runs on the sample fixture runs on the real demo pieces.
 import type { PieceMetadataInput } from '../../okf-generator/src/types.js';
@@ -92,6 +94,51 @@ export const demoPieces: PieceMetadataInput[] = [
             displayName: 'Text',
             description: 'The text whose characters will be reversed.',
             required: true,
+          },
+        },
+      },
+    },
+    triggers: {},
+  },
+  {
+    name: '@automators/piece-shell',
+    displayName: 'Shell (allowlisted)',
+    description:
+      'Run an ALLOWLISTED binary with arguments. Deterministic: execFile (no shell), so no injection.',
+    version: '0.1.0',
+    categories: ['CORE'],
+    authors: ['myorg'],
+    actions: {
+      run: {
+        name: 'run',
+        displayName: 'Run (allowlisted)',
+        description:
+          'Run an ALLOWLISTED binary with arguments. Deterministic: uses execFile (no shell), so no injection. The agent cannot run arbitrary commands — only the binaries in the allowlist.',
+        requireAuth: false,
+        audience: 'both',
+        aiMetadata: {
+          description:
+            'Run an allowlisted binary (prop "bin": git, sqlite3, echo, ls, cat, pwd, date, wc, head, tail, node) with prop "args" (array) and optional prop "cwd". Uses execFile (no shell, args array). Returns {exitCode, stdout, stderr}. No auth.',
+          idempotent: false,
+        },
+        props: {
+          bin: {
+            type: 'SHORT_TEXT',
+            displayName: 'Binary',
+            description: 'Allowed: git, sqlite3, echo, ls, cat, pwd, date, wc, head, tail, node',
+            required: true,
+          },
+          args: {
+            type: 'ARRAY',
+            displayName: 'Arguments',
+            description: 'Arguments passed to the binary (array, no shell interpolation).',
+            required: false,
+          },
+          cwd: {
+            type: 'SHORT_TEXT',
+            displayName: 'Working dir',
+            description: 'Optional working directory for the binary.',
+            required: false,
           },
         },
       },

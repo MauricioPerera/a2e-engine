@@ -137,9 +137,29 @@ export function reconcileCapabilities(manifest: CapabilityManifest | undefined, 
   } else {
     out.push(...reconcileDeclared(manifest, facts));
   }
-  // executesCode is always an error, declared or not — forbidden in A2E pieces.
+  // executesCode is a DECLARED capability, gated exactly like egress/env/file:
+  // declared in the manifest -> warn (operator-vetted); NOT declared -> error.
+  //
+  // HONEST MODEL: this static check is a SIGNAL, not a guarantee. The literal-token
+  // regex is trivially evadible by assembling the module name at runtime, so it
+  // cannot be trusted to PROVE a piece does not execute code — it can only make
+  // declaration explicit so an operator vets code-executing pieces. The real
+  // containment of UNTRUSTED code is the bwrap sandbox, not this regex; a piece
+  // that passes static analysis is not thereby trusted to run unsandboxed.
   if (facts.executesCode) {
-    out.push({ level: 'error', code: 'executes-code', message: 'code executes arbitrary code (eval/Function/child_process); forbidden in A2E pieces' });
+    if (manifest && manifest.executesCode === true) {
+      out.push({
+        level: 'warn',
+        code: 'executes-code',
+        message: 'declared executes-code; operator-vetted; untrusted pieces must run in the bwrap sandbox, not trusted to static analysis',
+      });
+    } else {
+      out.push({
+        level: 'error',
+        code: 'undeclared-executes-code',
+        message: 'piece executes code but does not declare it',
+      });
+    }
   }
   return out;
 }
