@@ -150,6 +150,15 @@ export const tools: ToolDefinition[] = [
       "Compose and execute a workflow from piece steps right now (ephemeral, not saved). " +
       "Each step is a piece invocation: { name, pieceName, pieceVersion, actionName, input, connection? }. " +
       "Only pieces are accepted — there is NO code step and the agent cannot run arbitrary code. " +
+      "Chaining between steps: to use a previous step's result inside another step's input, set the " +
+      "input value to the reference string `{{stepName.output}}` (or `{{stepName.output.fieldName}}` for " +
+      "a specific field). NEVER hardcode or copy a value that comes from a prior step — always reference it. " +
+      "Step names must be identifiers (letters, digits, underscore). Example: a step named `parse` outputs " +
+      "an object; a later step uses input `{ \"json\": \"{{parse.output}}\" }`. If a step references an unknown " +
+      "step, execution is rejected before running. " +
+      "Some actions take an expression in their own language (e.g. run_jsonata_query's `query`): use that " +
+      "language's native field syntax (for JSONata, reference fields bare like `a + b`, NOT `$a + $b` — `$x` " +
+      "means a variable, not a field). " +
       "Returns { status, output, error? }. POST /execute.",
     inputSchema: {
       type: "object",
@@ -171,6 +180,15 @@ export const tools: ToolDefinition[] = [
     name: "save_workflow",
     description:
       "Persist a named workflow composed of piece steps (so it can be re-run later). " +
+      "Steps have the same shape and chaining rules as execute_workflow: to use a previous step's result " +
+      "inside another step's input, set the input value to the reference string `{{stepName.output}}` (or " +
+      "`{{stepName.output.fieldName}}` for a specific field). NEVER hardcode or copy a value that comes from " +
+      "a prior step — always reference it. Step names must be identifiers (letters, digits, underscore). " +
+      "Example: a step named `parse` outputs an object; a later step uses input `{ \"json\": \"{{parse.output}}\" }`. " +
+      "If a step references an unknown step, execution is rejected before running. " +
+      "Some actions take an expression in their own language (e.g. run_jsonata_query's `query`): use that " +
+      "language's native field syntax (for JSONata, reference fields bare like `a + b`, NOT `$a + $b` — `$x` " +
+      "means a variable, not a field). " +
       "Returns { id, version, path }. POST /workflows.",
     inputSchema: {
       type: "object",
