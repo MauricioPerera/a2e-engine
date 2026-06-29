@@ -101,6 +101,50 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return send(res, { status: 404, body: { error: `no admin route for ${method} ${pathname}` } });
   }
 
+  // --- SOURCES PLANE (operator-only, gated by X-Admin-Token) ----------------
+  // /sources/discover y /sources/build importan codigo de repos NO confiables
+  // (T2): un agente (X-API-Key) NO debe disparar imports. Se gatean con
+  // requireAdmin (X-Admin-Token), igual que /admin/*, ANTES del auth gate del
+  // agente -> un operador con solo X-Admin-Token (sin API key) puede usarlas, y
+  // un agente con X-API-Key nunca las alcanza. Si ADMIN_TOKEN no esta seteado,
+  // /sources/* deshabilitado (404), igual que /admin.
+  if (pathname === "/sources/discover" || pathname === "/sources/build") {
+    const admin = requireAdmin(req);
+    if (admin.reason === "disabled") {
+      return send(res, { status: 404, body: { error: "sources disabled" } });
+    }
+    if (!admin.ok) {
+      return send(res, { status: 401, body: { error: "unauthorized" } });
+    }
+    // POST /sources/discover { source, ref? } -> { sourceId, pieces, total, warnings }
+    // Discovery SEGURO: clona (git) / lee (local) + parsea package.json + src/index.ts.
+    // NO ejecuta codigo de las pieces. dir es relativo al root del source.
+    if (method === "POST" && pathname === "/sources/discover") {
+      const raw = await readBody(req);
+      let parsed: DiscoverSourcesRequest;
+      try {
+        parsed = JSON.parse(raw) as DiscoverSourcesRequest;
+      } catch {
+        return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+      }
+      return send(res, await handleDiscoverSources(parsed));
+    }
+    // POST /sources/build { sourceDir, pieces:[names], outRoot?, catalogOut? } ->
+    //   { built, rejected, catalogPath }. Valida -> bundlea solo las validas ->
+    //   catalogo OKF aislado.
+    if (method === "POST" && pathname === "/sources/build") {
+      const raw = await readBody(req);
+      let parsed: BuildSourcesRequest;
+      try {
+        parsed = JSON.parse(raw) as BuildSourcesRequest;
+      } catch {
+        return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+      }
+      return send(res, await handleBuildSources(parsed));
+    }
+    return send(res, { status: 404, body: { error: `no sources route for ${method} ${pathname}` } });
+  }
+
   // --- AUTH GATE -----------------------------------------------------------
   // Enforced only when API_KEYS is set. POST /webhooks/:id is exempt (the
   // triggerId is the bearer secret for external emitters; see auth.ts TODO).
@@ -366,34 +410,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return send(res, await handleAttestKnowledge(id, parsed));
     }
   }
-
-  // POST /sources/discover { source, ref? } -> { sourceId, pieces, total, warnings }
-  // Discovery SEGURO: clona (git) / lee (local) + parsea package.json + src/index.ts.
-  // NO ejecuta codigo de las pieces. dir es relativo al root del source.
-  if (method === "POST" && pathname === "/sources/discover") {
-    const raw = await readBody(req);
-    let parsed: DiscoverSourcesRequest;
-    try {
-      parsed = JSON.parse(raw) as DiscoverSourcesRequest;
-    } catch {
-      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
-    }
-    return send(res, await handleDiscoverSources(parsed));
-  }
-  // POST /sources/build { sourceDir, pieces:[names], outRoot?, catalogOut? } ->
-  //   { built, rejected, catalogPath }. Valida -> bundlea solo las validas ->
-  //   catalogo OKF aislado.
-  if (method === "POST" && pathname === "/sources/build") {
-    const raw = await readBody(req);
-    let parsed: BuildSourcesRequest;
-    try {
-      parsed = JSON.parse(raw) as BuildSourcesRequest;
-    } catch {
-      return send(res, { status: 400, body: { error: "body must be valid JSON" } });
-    }
-    return send(res, await handleBuildSources(parsed));
-  }
-
 
   // POST /agent/context { query, projectId? } -> contexto ensamblado + accounting + guardrail.
   if (method === "POST" && pathname === "/agent/context") {

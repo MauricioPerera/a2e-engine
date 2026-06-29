@@ -16,7 +16,7 @@
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { discoverSource } from "./discover.js";
@@ -138,6 +138,76 @@ function normalizeAuth(auth: unknown): PieceAuthSummary | undefined {
     description: a.description as string | undefined,
     required: a.required as boolean | undefined,
   };
+}
+
+// Instala las deps de TERCEROS de una piece (las que NO son @activepieces/*,
+// que se resuelven por alias de esbuild) en pieceDir/node_modules, ANTES del
+// bundle. Sin esto, esbuild no resuelve imports como `jsonata` en pieces de
+// repos no confiables (su node_modules no viene en el source importado).
+//
+// `--ignore-scripts` es OBLIGATORIO: los paquetes son no confiables y un
+// postinstall podria RCEar el host. El codigo de la piece solo correra luego
+// DENTRO del sandbox (T2_SANDBOX=1); el install solo baja codigo, no lo ejecuta.
+//
+// npm se ejecuta con cwd=pieceDir, pero ANTES se intercambia package.json por
+// un stub que contiene SOLO las deps de terceros: npm en modo workspace:* no
+// soporta el spec `workspace:` (EUNSUPPORTEDPROTOCOL) de las @activepieces/*.
+// Las @activepieces/* no se instalan (las resuelve el alias de esbuild desde
+// AP_REPO); instalarlas desde el registry fallaria anyway. El package.json
+// original se restaura siempre (finally). El stub es reverible: si el proceso
+// muere a medias, el package.json del source importado (copia en /tmp) queda
+// stubbed, lo cual es inocuo para un repo no confiable de importacion.
+//
+// Si el install falla, lanza -> la piece se rechaza con code "deps-install-failed"
+// (el batch continua; no crashea).
+function installThirdPartyDeps(pieceDir: string): void {
+  const pkgPath = path.join(pieceDir, "package.json");
+  if (!existsSync(pkgPath)) return; // sin package.json -> nada que instalar
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+  };
+  const deps = pkg.dependencies ?? {};
+  const thirdParty: Record<string, string> = {};
+  for (const [k, v] of Object.entries(deps)) {
+    // @activepieces/* van por alias de esbuild (AP_REPO); no se instalan.
+    if (k.startsWith("@activepieces/")) continue;
+    if (typeof v === "string" && v.length > 0) thirdParty[k] = v;
+  }
+  if (Object.keys(thirdParty).length === 0) return; // sin deps de terceros
+
+  const backup = readFileSync(pkgPath);
+  const lockPath = path.join(pieceDir, "package-lock.json");
+  let lockBackup: Buffer | null = null;
+  const hadLock = existsSync(lockPath);
+  if (hadLock) {
+    lockBackup = readFileSync(lockPath);
+    // Un lock preexistente (con specs workspace:*) chocaria con el stub; se
+    // restaura en finally.
+    unlinkSync(lockPath);
+  }
+  const stub = { ...pkg, dependencies: thirdParty, devDependencies: {}, peerDependencies: {} };
+  try {
+    writeFileSync(pkgPath, JSON.stringify(stub, null, 2));
+    execFileSync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-save"], {
+      cwd: pieceDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch (e) {
+    const err = e as { stderr?: Buffer | string; stdout?: Buffer | string; message: string };
+    const se = err.stderr ? (typeof err.stderr === "string" ? err.stderr : err.stderr.toString()) : "";
+    const so = err.stdout ? (typeof err.stdout === "string" ? err.stdout : err.stdout.toString()) : "";
+    throw new Error(
+      `npm install (third-party deps) failed for ${pieceDir}: ${(se || so || err.message).slice(-600)}`,
+    );
+  } finally {
+    writeFileSync(pkgPath, backup);
+    if (hadLock && lockBackup) writeFileSync(lockPath, lockBackup);
+  }
 }
 
 // Require el bundle ya generado por build-piece.mjs y extrae .metadata().
@@ -269,6 +339,27 @@ export async function buildSelectedPieces(
   const inputs: PieceMetadataInput[] = [];
   for (const { name, absDir } of valid) {
     try {
+      // Instala deps de terceros (no @activepieces/*) en pieceDir/node_modules
+      // ANTES del bundle, para que esbuild resuelva imports como `jsonata`.
+      // SOLO en modo sandbox (T2_SANDBOX=1, repos NO confiables): su node_modules
+      // no viene en el source importado. En modo in-process (pieces confiables
+      // del workspace ~/ap) las deps ya estan resueltas via hoisting del
+      // workspace (node_modules gestionado por bun); correr npm install ahi
+      // rompe (arborist choca con node_modules/.bun) y es innecesario.
+      // --ignore-scripts: el codigo de la piece (no confiable) solo correra
+      // luego DENTRO del sandbox; aqui solo se baja, no se ejecuta.
+      if (useSandbox) {
+        try {
+          installThirdPartyDeps(absDir);
+        } catch (e) {
+          rejected.push({
+            name,
+            reason: "deps-install-failed",
+            findings: [{ level: "error", code: "deps-install-failed", message: (e as Error).message }],
+          });
+          continue;
+        }
+      }
       let meta: PieceMetadataInput;
       let version: string;
       if (useSandbox) {
