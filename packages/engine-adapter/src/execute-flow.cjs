@@ -1,4 +1,14 @@
 // Adapter: runs a PieceAction in-process through the bundled Activepieces engine.
+// engine.cjs captures AP_EXECUTION_MODE / AP_PAUSED_FLOW_TIMEOUT_DAYS at module-load
+// time (var EXECUTION_MODE = process.env.AP_EXECUTION_MODE). product-api sets
+// these in configureEngineEnv() AFTER handlers.ts (and thus this file) is
+// imported, so without this guard the engine loads with EXECUTION_MODE=undefined
+// and any multi-step flow with an inter-step reference like {{step1.output}}
+// throws 500 ExecutionModeNotSetError from the code-sandbox. Set sane defaults
+// BEFORE the require so the capture resolves regardless of import order.
+process.env.AP_EXECUTION_MODE = process.env.AP_EXECUTION_MODE || 'UNSANDBOXED';
+process.env.AP_PAUSED_FLOW_TIMEOUT_DAYS = process.env.AP_PAUSED_FLOW_TIMEOUT_DAYS || '1';
+
 const { flowExecutor, EngineConstants, FlowExecutorContext } = require('../dist/engine.cjs');
 
 const DEFAULT_RETRY = { maxAttempts: 1, retryExponential: 2, retryInterval: 1 };

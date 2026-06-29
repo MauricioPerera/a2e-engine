@@ -17,6 +17,7 @@ import {
 } from "../../flow-builder/src/flow-builder.js";
 import { validateActionInput } from "../../flow-builder/src/validate-input.js";
 import { flattenSteps } from "../../flow-builder/src/validate-workflow.js";
+import { sanitizeSteps } from "../../flow-builder/src/sanitize-steps.js";
 import {
   validateWorkflow,
   type CatalogPiece,
@@ -468,7 +469,7 @@ export async function handleValidateWorkflow(req: ValidateWorkflowRequest): Prom
   if (!req || !Array.isArray(req.steps)) {
     return { status: 400, body: { error: "steps (array) required" } };
   }
-  const wfReq: ExecuteRequest = { steps: req.steps as ExecuteRequest["steps"] };
+  const wfReq: ExecuteRequest = sanitizeSteps({ steps: req.steps as ExecuteRequest["steps"] });
   const projectId = typeof req.projectId === "string" && req.projectId ? req.projectId : PROJECT_ID;
   const core = validateWorkflowCore(wfReq, projectId);
   const findings: WfFinding[] = [...core.findings];
@@ -497,13 +498,21 @@ export async function handleValidateWorkflow(req: ValidateWorkflowRequest): Prom
 
 // POST /execute -> validate each step's input, build flow, run it, return REAL result.
 export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult> {
+  // AUTO-SANITIZADO PRE-VALIDACIÓN: el agente a veces manda nombres de step
+  // inválidos (ej. "Convert Text to JSON" con espacios). En lugar de rechazar
+  // con 'invalid-step-name' y forzar un reintento del agente, reescribimos los
+  // nombres a la forma válida (/^[a-zA-Z0-9_]+$/) y las refs {{name.output}} en
+  // sincronía, ANTES de validar/ejecutar. Módulo puro: no muta el input original.
+  // El resto del pre-flight (refs a steps inexistentes, piece/connection) sigue
+  // igual sobre el request ya sanitizado.
+  const sreq = sanitizeSteps(req);
   // PRE-FLIGHT (tier estructura + contexto): caza workflows inválidos ANTES de
   // tocar el engine. piece inexistente (antes PieceNotFoundError del engine en
   // runtime), ref a step inexistente, connection inexistente -> 400 workflow_invalid
   // con los findings, SIN ejecutar. NO incluye validateActionInput (esa gatea el
   // input per-step y sigue devolviendo 400 validation_failed para no romper la
   // semántica previa); por eso el pre-flight es estructura+contexto únicamente.
-  const preflight = validateWorkflowCore(req, PROJECT_ID);
+  const preflight = validateWorkflowCore(sreq, PROJECT_ID);
   if (!preflight.ok) {
     return { status: 400, body: { error: "workflow_invalid", findings: preflight.findings } };
   }
@@ -513,8 +522,8 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
   // step y NO se ejecuta el flow. Router/loop steps (sin pieceName+actionName) y
   // actions no indexadas se saltan (ver nota en actionPropsIndex).
   const stepResults: Array<{ name: string; errors: string[] }> = [];
-  if (Array.isArray(req.steps)) {
-    for (const s of req.steps) {
+  if (Array.isArray(sreq.steps)) {
+    for (const s of sreq.steps) {
       const ps = s as PieceStepReq;
       if (!ps.pieceName || !ps.actionName) continue; // router/loop o sin acción
       const props = actionPropsIndex.get(`${ps.pieceName}|${ps.actionName}`);
@@ -537,7 +546,7 @@ export async function handleExecute(req: ExecuteRequest): Promise<HandlerResult>
 
   let action: unknown;
   try {
-    action = buildFlowFromRequest(req, new Date().toISOString());
+    action = buildFlowFromRequest(sreq, new Date().toISOString());
   } catch (e) {
     return { status: 400, body: { error: `invalid request: ${(e as Error).message}` } };
   }
