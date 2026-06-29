@@ -241,6 +241,38 @@ export const tools: ToolDefinition[] = [
     }),
   },
   {
+    name: "retrieve_flows",
+    description:
+      "Discover SAVED workflows relevant to a task, with two trust gates so the agent " +
+      "reuses a flow rather than re-composing blindly. VALIDITY: each flow is " +
+      "re-validated against the CURRENT piece catalog, so a flow whose pieces " +
+      "changed or disappeared is flagged invalid/stale. HEALTH: per-flow run " +
+      "history aggregated by workflow id (N runs, X% ok, last status, untested " +
+      "if no runs). Returns an OKF context bounded by a token budget listing the " +
+      "matching flows with their validity and health. Use this BEFORE composing a " +
+      "new workflow, to REUSE a saved flow that is valid AND healthy; then " +
+      "run_saved_workflow to execute it by id. GET /flows/retrieve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language description of the task." },
+        budget: {
+          type: "number",
+          description: "Max tokens for the returned flows context. Defaults to 4000 if omitted.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    handler: safe(async (args) => {
+      return apiCall({
+        method: "GET",
+        path: "/flows/retrieve",
+        query: { q: str(args, "query"), budget: optNum(args, "budget") },
+      });
+    }),
+  },
+  {
     name: "query_knowledge",
     description:
       "Query operational learnings (entries with a freshness verdict per entry, so the " +

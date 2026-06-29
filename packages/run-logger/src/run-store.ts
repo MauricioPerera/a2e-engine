@@ -125,6 +125,7 @@ async function readDayRuns(dir: string): Promise<FlowRun[]> {
       steps: [],
     };
     if (fm.failedStep && fm.failedStep !== "null") run.failedStep = fm.failedStep;
+    if (fm.workflowId && fm.workflowId !== "null") run.workflowId = fm.workflowId;
     runs.push(run);
   }
   runs.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
@@ -152,6 +153,7 @@ export function flowRunFromResult(args: {
   verdict: { status: string; failedStep?: string | { name?: string; displayName?: string; message?: string } };
   steps: Record<string, { status: string; output: unknown; errorMessage?: string }>;
   error?: { name?: string; message?: string; stack?: string };
+  workflowId?: string;
 }): FlowRun {
   // Normalizamos a string los campos que alimentan renderRunDoc: el engine
   // puede devolver status/failedStep/errorMessage no-string (ej. verdict
@@ -173,6 +175,7 @@ export function flowRunFromResult(args: {
     durationMs: Number.isFinite(durationMs) ? durationMs : 0,
     steps,
   };
+  if (args.workflowId !== undefined) run.workflowId = args.workflowId;
   const fs = args.verdict?.failedStep;
   const failedStepName =
     typeof fs === "string" ? fs : fs && typeof fs === "object" ? String(fs.name ?? "") : "";
@@ -295,4 +298,27 @@ export async function getRun(opts: {
   } catch {
     return null;
   }
+}
+
+// Lista TODOS los runs de TODAS las fechas (con workflowId parseado del
+// frontmatter), recorriendo cada runs/<date>/ en orden. Para agregación de salud
+// por workflowId (retrieve-flows): listRuns sólo devuelve recientes (cap 20) o
+// un día concreto, insuficiente para computar health histórica por flujo.
+// Orden: por fecha asc, y dentro de cada fecha el orden asc por startedAt de
+// readDayRuns (estable). Sin estado en memoria: lee disco cada vez.
+export async function listAllRuns(opts: { repoDir: string }): Promise<FlowRun[]> {
+  const runsRoot = path.join(opts.repoDir, "runs");
+  let dateDirs: string[] = [];
+  try {
+    dateDirs = (await fs.readdir(runsRoot)).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+  } catch {
+    return [];
+  }
+  dateDirs.sort();
+  const out: FlowRun[] = [];
+  for (const d of dateDirs) {
+    const rs = await readDayRuns(path.join(runsRoot, d));
+    for (const r of rs) out.push(r);
+  }
+  return out;
 }

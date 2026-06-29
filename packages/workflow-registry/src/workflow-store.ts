@@ -291,3 +291,14 @@ export async function getWorkflow(
 ): Promise<{ markdown: string; record: WorkflowRecord } | null> {
   return readWorkflowFile(opts.repoDir, opts.id);
 }
+
+// Lista todos los workflows como WorkflowRecord[] COMPLETOS (con steps[]
+// parseados del bloque ```json``` del doc), en orden por nombre. Reusa
+// readAllWorkflows (índice incremental sin estado en memoria). Lo usa
+// retrieve-flows para score por pieceNames + re-validación contra el catálogo
+// (listWorkflows sólo devuelve frontmatter, sin steps).
+export async function listWorkflowRecords(
+  opts: { repoDir: string },
+): Promise<WorkflowRecord[]> {
+  return readAllWorkflows(opts.repoDir);
+}

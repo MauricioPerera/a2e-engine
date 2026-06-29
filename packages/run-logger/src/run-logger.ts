@@ -13,6 +13,7 @@ export type FlowRun = {
   finishedAt: string;
   durationMs: number;
   steps: StepRecord[];
+  workflowId?: string;
   failedStep?: string;
   error?: { name?: string; message?: string; stack?: string };
 };
@@ -73,6 +74,9 @@ export function renderFrontmatter(run: FlowRun): string {
     `finishedAt: ${escapeYaml(run.finishedAt)}`,
     `durationMs: ${run.durationMs}`,
   ];
+  if (run.workflowId !== undefined) {
+    lines.push(`workflowId: ${escapeYaml(run.workflowId)}`);
+  }
   if (run.status !== 'SUCCEEDED') {
     if (run.failedStep !== undefined) {
       lines.push(`failedStep: ${escapeYaml(run.failedStep)}`);

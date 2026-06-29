@@ -21,6 +21,7 @@ import {
   handleListWorkflows,
   handleGetWorkflow,
   handleExecuteWorkflow,
+  handleRetrieveFlows,
   handleCreateKnowledge,
   handleListKnowledge,
   handleGetKnowledge,
@@ -368,6 +369,18 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (method === "POST" && parts.length === 2 && op === "execute") {
       return send(res, await handleExecuteWorkflow(id));
     }
+  }
+
+  // --- flows-retrieve (descubrimiento/reuso de workflows guardados) ---------
+  // GET /flows/retrieve?q=<query>&budget=<maxTokens> -> { context, included,
+  //   total, omitted, estimatedTokens } con gates de confianza VALIDEZ
+  //   (re-valida contra el catálogo actual) + SALUD (runs por workflowId).
+  //   El agente lo usa ANTES de componer, para reusar flujos válidos+sanos.
+  if (method === "GET" && pathname === "/flows/retrieve") {
+    const q = url.searchParams.get("q") ?? "";
+    const budgetRaw = url.searchParams.get("budget");
+    const budget = budgetRaw ? Number(budgetRaw) : undefined;
+    return send(res, await handleRetrieveFlows(q, budget));
   }
 
   // --- knowledge-base (OKF + git por entry) ---------------------------------

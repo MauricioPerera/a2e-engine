@@ -30,6 +30,7 @@ import {
   flowRunFromResult,
   listRuns,
   getRun,
+  listAllRuns,
 } from "../../run-logger/src/run-store.js";
 import {
   addEntry,
@@ -44,8 +45,11 @@ import {
   listWorkflows,
   getWorkflow,
   getIndexMarkdown,
+  listWorkflowRecords,
 } from "../../workflow-registry/src/workflow-store.js";
 import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
+import { retrieveFlows } from "../../workflow-registry/src/retrieve-flows.js";
+import type { FlowRun } from "../../run-logger/src/run-logger.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID, getVault } from "./mock-backend.js";
 import type { AppConnectionValue } from "../../backend-mock/src/vault.js";
@@ -119,6 +123,7 @@ async function recordRunBestEffort(args: {
   verdict: { status: string; failedStep?: string };
   steps: Record<string, { status: string; output: unknown; errorMessage?: string }>;
   error?: { name?: string; message?: string; stack?: string };
+  workflowId?: string;
 }): Promise<void> {
   try {
     const runId = randomUUID();
@@ -130,6 +135,7 @@ async function recordRunBestEffort(args: {
       verdict: args.verdict,
       steps: args.steps,
       ...(args.error ? { error: args.error } : {}),
+      ...(args.workflowId ? { workflowId: args.workflowId } : {}),
     });
     await appendRun(run, { repoDir: RUNS_REPO });
     // BUCLE APRENDIZAJE: run FAILED -> stub de conocimiento best-effort.
@@ -527,6 +533,7 @@ export function handlePieceActions(
 async function runFlow(
   action: unknown,
   source: string,
+  workflowId?: string,
 ): Promise<{ status: string; output: unknown; error?: string }> {
   const startedAt = new Date().toISOString();
   try {
@@ -540,7 +547,7 @@ async function runFlow(
     const verdict = result.verdict ?? { status: "UNKNOWN" };
     const stepsMap = result.steps ?? {};
     // Run-history best-effort: NO rompe la respuesta si falla.
-    await recordRunBestEffort({ source, startedAt, finishedAt, verdict, steps: stepsMap });
+    await recordRunBestEffort({ source, startedAt, finishedAt, verdict, steps: stepsMap, ...(workflowId ? { workflowId } : {}) });
     const stepNames = Object.keys(stepsMap);
     const last = stepNames[stepNames.length - 1];
     const step = last ? stepsMap[last] : undefined;
@@ -558,6 +565,7 @@ async function runFlow(
       finishedAt,
       verdict: { status: "FAILED" },
       steps: {},
+      ...(workflowId ? { workflowId } : {}),
       error: {
         name: (e as Error)?.name,
         message: (e as Error)?.message,
@@ -826,11 +834,46 @@ export async function handleExecuteWorkflow(id: string): Promise<HandlerResult> 
     return { status: 400, body: { error: `invalid stored workflow: ${(e as Error).message}` } };
   }
   try {
-    const body = await runFlow(action, `workflow:${id}`);
+    const body = await runFlow(action, `workflow:${id}`, id);
     return { status: 200, body };
   } catch (e) {
     return { status: 500, body: { error: `execution failed: ${(e as Error).message}` } };
   }
+}
+
+// GET /flows/retrieve?q=<query>&budget=<maxTokens> -> descubrimiento/reuso de
+// WORKFLOWS guardados con gates de confianza (VALIDEZ + SALUD). Lee los
+// workflows guardados (listWorkflowRecords: con steps[]), los runs reales
+// (listAllRuns: con workflowId parseado), agrupa runs por workflowId, re-valida
+// cada flow contra el catálogo ACTUAL (validateWorkflowCore: estructura +
+// contexto) y delega a retrieveFlows (score + validate + health + render OKF
+// acotado al budget). El agente lo usa ANTES de componer, para reusar flujos
+// válidos+sanos en vez de re-componer desde cero.
+export async function handleRetrieveFlows(
+  query: string,
+  budget: number | undefined,
+): Promise<HandlerResult> {
+  const flows = await listWorkflowRecords({ repoDir: WORKFLOWS_REPO });
+  const runs = await listAllRuns({ repoDir: RUNS_REPO });
+  // Agrupa runs por workflowId (retrieve-flows espera un map; un flow sin
+  // entrada = no probado -> health "0 runs (untested)").
+  const runsByWorkflow: Record<string, FlowRun[]> = {};
+  for (const r of runs) {
+    if (!r.workflowId) continue;
+    (runsByWorkflow[r.workflowId] ??= []).push(r);
+  }
+  // Gate de VALIDEZ: re-valida el flow contra el catálogo ACTUAL. Un flow
+  // guardado puede haber quedado stale (pieces que cambiaron o se borraron).
+  const validate = (wf: WorkflowRecord) =>
+    validateWorkflowCore({ steps: wf.steps } as ExecuteRequest, PROJECT_ID);
+  const result = retrieveFlows({
+    flows,
+    runsByWorkflow,
+    validate,
+    query,
+    budget: budget ?? 4000,
+  });
+  return { status: 200, body: result };
 }
 
 // --- knowledge-base (OKF + git por entry) -----------------------------------
