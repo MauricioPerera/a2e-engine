@@ -46,6 +46,11 @@ export interface BuiltPiece {
   name: string;
   dir: string;
   version: string;
+  // Findings (warns) de la validacion que PASO (ok:true). Las que no bloquean
+  // (ej. executes-code declarado, no-manifest/egress) viajan en la respuesta para
+  // que el operador VEA al importar las capacidades declaradas de la piece.
+  // Vacio/ausente si la piece valido sin warns o si validate=false.
+  findings?: { level: string; code: string; message: string }[];
 }
 
 export interface RejectedPiece {
@@ -348,7 +353,10 @@ export async function buildSelectedPieces(
 
   const built: BuiltPiece[] = [];
   const rejected: RejectedPiece[] = [];
-  const valid: { name: string; absDir: string }[] = [];
+  // findings de la validacion que PASO (ok:true) por name, para propagarlos al
+  // objeto built de cada piece (warns no bloqueantes: executes-code declarado,
+  // egress, etc.). Solo se guardan si doValidate corrio.
+  const valid: { name: string; absDir: string; findings?: { level: string; code: string; message: string }[] }[] = [];
 
   for (const name of opts.pieceNames) {
     const absDir = dirMap.get(name);
@@ -363,6 +371,11 @@ export async function buildSelectedPieces(
         rejected.push({ name, reason: "validation-failed", findings: vr.findings });
         continue;
       }
+      // ok:true: la piece se acepta, pero guardamos sus findings (warns) para
+      // que viajen en el resultado built. vr.findings puede traer warns como
+      // executes-code (declarado), egress, no-manifest, etc.
+      valid.push({ name, absDir, findings: vr.findings });
+      continue;
     }
     valid.push({ name, absDir });
   }
@@ -373,7 +386,7 @@ export async function buildSelectedPieces(
   // Sin T2_SANDBOX -> build + extractMetadataFromBundle in-process (pieces confiables).
   const useSandbox = process.env.T2_SANDBOX === "1";
   const inputs: PieceMetadataInput[] = [];
-  for (const { name, absDir } of valid) {
+  for (const { name, absDir, findings } of valid) {
     try {
       // Instala deps de terceros (no @activepieces/*) en pieceDir/node_modules
       // ANTES del bundle, para que esbuild resuelva imports como `jsonata`.
@@ -412,6 +425,10 @@ export async function buildSelectedPieces(
         name,
         dir: path.relative(root, absDir).replace(/\\/g, "/"),
         version,
+        // Propaga los findings (warns) de la validacion que paso, para que el
+        // operador VEA al importar capacidades declaradas (ej. executes-code).
+        // findings es undefined cuando validate=false -> se omite en el JSON.
+        ...(findings !== undefined ? { findings } : {}),
       });
     } catch (e) {
       rejected.push({
