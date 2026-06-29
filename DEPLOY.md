@@ -290,3 +290,37 @@ bundles resultantes se envían como artefactos prebuilt. El VPS sólo ejecuta
 Los cambios de código viven en el repo (`git push`). Los artefactos prebuilt
 (`dist/`, `full-catalog/`, `custom-pieces/`) se regeneran en la máquina de
 build y se sync al VPS con el `rsync` de §2. No hay rebuild en el VPS.
+---
+
+## Docker (self-host del motor)
+
+La imagen Docker empaqueta el **product-api + engine + catálogo + custom-pieces + vault**
+(runtime confiable). **NO** incluye el flujo T2 `/sources/build` (build de pieces no
+confiables) que requiere `bwrap` + toolchain Activepieces — ese flujo se ejecuta offline
+en la máquina de build y los artefactos resultantes se cargan como prebuilt.
+
+### Importante: el build necesita artefactos prebuilt
+
+El `docker build` copia el workspace COMPLETO, pero los artefactos prebuilt
+(`engine.cjs`, `full-catalog/`, `custom-pieces/`) están **gitignored**. Por tanto
+`docker build` desde un clon limpio **NO funciona** sin generarlos antes (§2 del build
+offline). La distribución recomendada es la **imagen ya construida** (push a un registry),
+no el `docker build` desde el repo.
+
+### Uso
+
+```bash
+# desde un árbol que SÍ tiene los artefactos prebuilt
+docker build -t a2e-engine .
+
+# arranca el motor; auth por API_KEYS, persisted en volumen a2e-data
+docker run -p 8088:8088 -e API_KEYS=tu-key:default -v a2e-data:/data a2e-engine
+```
+
+Combínalo con el cliente MCP [`@rckflr/a2e-mcp-server`](https://www.npmjs.com/package/@rckflr/a2e-mcp-server)
+(npm) apuntando `A2E_API_BASE` al motor (p. ej. `http://localhost:8088`).
+
+### Auth
+
+`API_KEYS` sin setear -> **auth abierta** (solo dev). En producción setear
+`API_KEYS=clave:scope,otra:scope` para exigir token.

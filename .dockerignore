@@ -1,0 +1,15 @@
+/node_modules
+/packages/*/node_modules
+.git
+Dockerfile
+.dockerignore
+**/.data
+**/.run-history
+**/.workflow-registry
+**/.knowledge-base
+**/vault.json
+**/store.json
+**/*.db
+**/*.sqlite
+**/*.tgz
+ecosystem*.cjs
