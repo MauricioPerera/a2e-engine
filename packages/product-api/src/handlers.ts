@@ -48,6 +48,7 @@ import {
 import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID, getVault } from "./mock-backend.js";
+import type { AppConnectionValue } from "../../backend-mock/src/vault.js";
 import { assembleAgentContext } from "./assemble-agent-context.js";
 import {
   renderConnectionRefs,
@@ -1354,6 +1355,69 @@ export function handleListConnections(params: ListConnectionsParams): HandlerRes
       connections: filtered,
       total: filtered.length,
     },
+  };
+}
+
+
+// --- ADMIN PLANE: operator-only credential loading (separate from agent) ----
+// POST /admin/connections (gated by requireAdmin in server.ts, NOT by the agent
+// auth gate). Writes a credential into the vault in the hot path and returns ONLY
+// the reference (externalId, pieceName, type). NEVER echoes the secret value back:
+// the response carries no secret_text, no props, no displayName echo of secrets.
+// The agent plane can later resolve {{connections['<externalId>']}} at execution
+// time without ever seeing the cleartext (the engine fetches it from the vault).
+export interface CreateAdminConnectionRequest {
+  externalId: string;
+  pieceName: string;
+  displayName?: string;
+  type: "SECRET_TEXT" | "CUSTOM_AUTH" | "NO_AUTH";
+  secret_text?: string;
+  props?: Record<string, unknown>;
+}
+
+export function handleCreateAdminConnection(req: CreateAdminConnectionRequest): HandlerResult {
+  const vault = getVault();
+  if (!vault) {
+    return { status: 503, body: { error: "vault not initialized" } };
+  }
+  if (typeof req.externalId !== "string" || req.externalId.length === 0) {
+    return { status: 400, body: { error: "externalId (string) required" } };
+  }
+  if (typeof req.pieceName !== "string" || req.pieceName.length === 0) {
+    return { status: 400, body: { error: "pieceName (string) required" } };
+  }
+  const type = req.type;
+  if (type !== "SECRET_TEXT" && type !== "CUSTOM_AUTH" && type !== "NO_AUTH") {
+    return { status: 400, body: { error: "type must be SECRET_TEXT | CUSTOM_AUTH | NO_AUTH" } };
+  }
+  let value: AppConnectionValue;
+  if (type === "SECRET_TEXT") {
+    if (typeof req.secret_text !== "string" || req.secret_text.length === 0) {
+      return { status: 400, body: { error: "secret_text (string) required for SECRET_TEXT" } };
+    }
+    value = { type: "SECRET_TEXT", secret_text: req.secret_text };
+  } else if (type === "CUSTOM_AUTH") {
+    if (!req.props || typeof req.props !== "object" || Array.isArray(req.props)) {
+      return { status: 400, body: { error: "props (object) required for CUSTOM_AUTH" } };
+    }
+    value = { type: "CUSTOM_AUTH", props: req.props };
+  } else {
+    value = { type: "NO_AUTH" };
+  }
+  const displayName = typeof req.displayName === "string" && req.displayName.length > 0
+    ? req.displayName
+    : req.externalId;
+  vault.put({
+    externalId: req.externalId,
+    projectId: PROJECT_ID,
+    pieceName: req.pieceName,
+    displayName,
+    value,
+  });
+  // Reference only. No secret_text, no props, no ciphertext, no echo.
+  return {
+    status: 200,
+    body: { externalId: req.externalId, pieceName: req.pieceName, type },
   };
 }
 

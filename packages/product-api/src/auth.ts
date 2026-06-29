@@ -61,3 +61,47 @@ export function authenticate(req: IncomingMessage, cfg: ApiKeyConfig): AuthResul
 export function isWebhookIngress(method: string, pathname: string): boolean {
   return method === "POST" && pathname.startsWith("/webhooks/");
 }
+
+
+// --- ADMIN PLANE (operator-only, separate from the agent plane) -----------
+// The agent plane uses X-API-Key (API_KEYS). The admin plane uses a DISTINCT
+// token (ADMIN_TOKEN) and is gated by requireAdmin below. The two planes are
+// fully separate: the agent X-API-Key never authorizes /admin, and ADMIN_TOKEN
+// must NOT be one of the agent API_KEYS (configuration invariant; the operator
+// sets distinct env values).
+//
+// If ADMIN_TOKEN is unset/empty, the whole admin plane is DISABLED: every
+// /admin/* route returns 404 admin disabled (see server.ts). A deployment that
+// does not need operator access can simply leave it unset and the surface for
+// credential-loading disappears entirely.
+
+// True when the admin plane is armed (ADMIN_TOKEN set to a non-empty value).
+export function isAdminEnabled(): boolean {
+  const t = process.env.ADMIN_TOKEN;
+  return typeof t === "string" && t.length > 0;
+}
+
+export type AdminAuthReason = "disabled" | "unauthorized" | "ok";
+
+export interface AdminAuthResult {
+  ok: boolean;
+  reason: AdminAuthReason;
+}
+
+// Enforce the admin token on a request. Does NOT mutate the response.
+//   - ADMIN_TOKEN unset/empty        -> { ok:false, reason: "disabled" }
+//   - header missing or wrong token -> { ok:false, reason: "unauthorized" }
+//   - header === ADMIN_TOKEN        -> { ok:true,  reason: "ok" }
+// The agent X-API-Key is deliberately NOT consulted here.
+export function requireAdmin(req: IncomingMessage): AdminAuthResult {
+  const expected = process.env.ADMIN_TOKEN;
+  if (typeof expected !== "string" || expected.length === 0) {
+    return { ok: false, reason: "disabled" };
+  }
+  const provided = req.headers["x-admin-token"];
+  const token = Array.isArray(provided) ? String(provided[0]) : provided;
+  if (typeof token !== "string" || token.length === 0 || token !== expected) {
+    return { ok: false, reason: "unauthorized" };
+  }
+  return { ok: true, reason: "ok" };
+}

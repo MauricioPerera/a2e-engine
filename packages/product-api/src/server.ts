@@ -26,6 +26,7 @@ import {
   handleGetKnowledge,
   handleAttestKnowledge,
   handleListConnections,
+  handleCreateAdminConnection,
   handleAssembleAgentContext,
   handleAgentRun,
   handleDiscoverSources,
@@ -42,8 +43,9 @@ import {
   type DiscoverSourcesRequest,
   type BuildSourcesRequest,
   type AgentRunRequest,
+  type CreateAdminConnectionRequest,
 } from "./handlers.js";
-import { parseApiKeys, authenticate, isWebhookIngress } from "./auth.js";
+import { parseApiKeys, authenticate, isWebhookIngress, requireAdmin } from "./auth.js";
 
 function send(res: ServerResponse, result: HandlerResult): void {
   if (typeof result.body === "string") {
@@ -70,6 +72,34 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const { pathname } = url;
   const method = req.method ?? "GET";
+
+  // --- ADMIN PLANE (operator-only, SEPARATE from the agent plane) -----------
+  // /admin/* uses X-Admin-Token (ADMIN_TOKEN), NOT the agent X-API-Key. It is
+  // handled here BEFORE the agent auth gate so the agent key can never reach
+  // /admin and an admin request never trips the agent gate. If ADMIN_TOKEN is
+  // unset, the whole plane is disabled (404). The agent cannot create or read
+  // secrets via this plane: it has no admin token, and the response echoes only
+  // the reference (see handleCreateAdminConnection).
+  if (pathname.startsWith("/admin/")) {
+    const admin = requireAdmin(req);
+    if (admin.reason === "disabled") {
+      return send(res, { status: 404, body: { error: "admin disabled" } });
+    }
+    if (!admin.ok) {
+      return send(res, { status: 401, body: { error: "unauthorized" } });
+    }
+    if (method === "POST" && pathname === "/admin/connections") {
+      const raw = await readBody(req);
+      let parsed: CreateAdminConnectionRequest;
+      try {
+        parsed = JSON.parse(raw) as CreateAdminConnectionRequest;
+      } catch {
+        return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+      }
+      return send(res, handleCreateAdminConnection(parsed));
+    }
+    return send(res, { status: 404, body: { error: `no admin route for ${method} ${pathname}` } });
+  }
 
   // --- AUTH GATE -----------------------------------------------------------
   // Enforced only when API_KEYS is set. POST /webhooks/:id is exempt (the
