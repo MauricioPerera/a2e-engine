@@ -90,45 +90,60 @@ function parseActions(md) {
 }
 
 async function build() {
-  const piecesDir = join(CATALOG_ROOT, "@activepieces");
-  let entries = await readdir(piecesDir, { withFileTypes: true });
-  entries = entries.filter((e) => e.isDirectory() && e.name.startsWith("piece-"));
-  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // Multi-scope: escanea TODOS los dirs @<scope> bajo CATALOG_ROOT, no solo
+  // @activepieces. Las pieces importadas (T2) viven bajo otros scopes (ej.
+  // @automators/..., @promotest/...); antes solo se indexaba @activepieces y
+  // el discovery nivel 1 (catalog-summary.json) las ignoraba. Cada scope se
+  // recorre igual que antes: dirs piece-* con index.md.
+  const scopeEntries = await readdir(CATALOG_ROOT, { withFileTypes: true });
+  const scopes = scopeEntries
+    .filter((e) => e.isDirectory() && e.name.startsWith("@"))
+    .map((e) => e.name)
+    .sort();
 
   const summary = [];
   let totalActions = 0;
   let skipped = 0;
-  for (const e of entries) {
-    const idxPath = join(piecesDir, e.name, "index.md");
-    let md;
-    try {
-      md = await readFile(idxPath, "utf8");
-    } catch {
-      skipped++;
-      continue;
+  const scopesUsed = [];
+  for (const scope of scopes) {
+    const scopeDir = join(CATALOG_ROOT, scope);
+    let entries = await readdir(scopeDir, { withFileTypes: true });
+    entries = entries.filter((e) => e.isDirectory() && e.name.startsWith("piece-"));
+    if (entries.length === 0) continue;
+    scopesUsed.push(scope);
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const idxPath = join(scopeDir, e.name, "index.md");
+      let md;
+      try {
+        md = await readFile(idxPath, "utf8");
+      } catch {
+        skipped++;
+        continue;
+      }
+      const fm = parseFrontmatter(md);
+      const name = typeof fm.resource === "string" && fm.resource.length > 0 ? fm.resource : `${scope}/${e.name}`;
+      const displayName = typeof fm.title === "string" && fm.title.length > 0 ? fm.title : e.name;
+      const description = typeof fm.description === "string" ? fm.description : "";
+      const tags = Array.isArray(fm.tags) ? fm.tags.filter((t) => typeof t === "string") : undefined;
+      const auth = parseAuth(md);
+      const actions = parseActions(md);
+      totalActions += actions.length;
+      summary.push({
+        name,
+        displayName,
+        description,
+        ...(tags && tags.length ? { tags } : {}),
+        ...(auth ? { auth } : {}),
+        actions,
+      });
     }
-    const fm = parseFrontmatter(md);
-    const name = typeof fm.resource === "string" && fm.resource.length > 0 ? fm.resource : `@activepieces/${e.name}`;
-    const displayName = typeof fm.title === "string" && fm.title.length > 0 ? fm.title : e.name;
-    const description = typeof fm.description === "string" ? fm.description : "";
-    const tags = Array.isArray(fm.tags) ? fm.tags.filter((t) => typeof t === "string") : undefined;
-    const auth = parseAuth(md);
-    const actions = parseActions(md);
-    totalActions += actions.length;
-    summary.push({
-      name,
-      displayName,
-      description,
-      ...(tags && tags.length ? { tags } : {}),
-      ...(auth ? { auth } : {}),
-      actions,
-    });
   }
 
   await writeFile(OUT_PATH, JSON.stringify(summary, null, 0));
   const buf = Buffer.from(JSON.stringify(summary));
   console.log(`[build-catalog-summary] root=${CATALOG_ROOT}`);
-  console.log(`[build-catalog-summary] pieces=${summary.length} (skipped=${skipped}) actions=${totalActions}`);
+  console.log(`[build-catalog-summary] scopes=${scopesUsed.length} (${scopesUsed.join(",")}) pieces=${summary.length} (skipped=${skipped}) actions=${totalActions}`);
   console.log(`[build-catalog-summary] wrote=${OUT_PATH} (${buf.length} bytes, ~${Math.ceil(buf.length / 4)} tokens)`);
   // muestra una muestra para verificación
   const sample = summary.find((p) => p.name === "@activepieces/piece-slack") ?? summary[0];

@@ -83,6 +83,7 @@ import {
 import { generateSecret, verifySignature } from "./webhook-hmac.js";
 import { discoverSource, type DiscoverOptions } from "../../piece-source-manager/src/discover.js";
 import { buildSelectedPieces } from "../../piece-source-manager/src/build-source.js";
+import { promoteSource } from "./promote-source.js";
 import { runAgent } from "../../agent-runtime/src/orchestrator.js";
 import { callOllama } from "../../agent-runtime/src/ollama-provider.js";
 
@@ -336,6 +337,13 @@ function loadCatalogSummary(): PieceSummary[] | null {
     return null;
   }
 }
+// Invalida el cache de modulo de catalog-summary (nivel 1). Lo llama
+// handlePromoteSources tras reconstruir catalog-summary.json, para que la
+// próxima lectura cargue el summary nuevo (con las pieces promovidas).
+export function resetCatalogSummaryCache(): void {
+  catalogSummaryCache = undefined;
+}
+
 // GET /catalog/retrieve?q=<query>&budget=<maxTokens>&mode=index|detail ->
 //   { context, included, estimatedTokens, total, omitted }  (subconjunto del catalogo
 //   que cabe en el budget de tokens). Resuelve "el catalogo no cabe en el contexto".
@@ -1623,6 +1631,50 @@ export interface BuildSourcesRequest {
   pieces: string[];
   outRoot?: string;
   catalogOut?: string;
+}
+
+// Dir vivo de pieces promovidas (bundles). Via env PROMOTED_PIECES_DIR; default
+// al promoted-pieces de engine-adapter (el MISMO default que usa index.ts para
+// AP_CUSTOM_PIECES_PATHS). El engine carga de aqui en ejecucion.
+function promotedPiecesDir(): string {
+  return process.env.PROMOTED_PIECES_DIR ?? path.resolve(HANDLERS_DIR, "../../engine-adapter/promoted-pieces");
+}
+
+// POST /admin/promote { sourceDir, pieces:[names] } -> { promoted, rejected }.
+// Promueve pieces importadas (T2) al catalogo vivo: bundles a promotedDir (layout
+// del engine), OKF a full-catalog, rebuild catalog-summary. GATEADO por
+// X-Admin-Token en server.ts (mismo gate admin que /admin/* y /sources/*). Tras
+// promover invalida catalogSummaryCache (nivel 1) y flow-gate snapshot (validez
+// de flujos). full-catalog se lee por request (sin cache de modulo).
+export interface PromoteSourcesRequest {
+  sourceDir: string;
+  pieces: string[];
+}
+
+export async function handlePromoteSources(req: PromoteSourcesRequest): Promise<HandlerResult> {
+  if (typeof req.sourceDir !== "string" || req.sourceDir.length === 0) {
+    return { status: 400, body: { error: "sourceDir (string) required" } };
+  }
+  if (!Array.isArray(req.pieces) || req.pieces.length === 0) {
+    return { status: 400, body: { error: "pieces (string[]) required" } };
+  }
+  try {
+    const result = await promoteSource({
+      sourceDir: req.sourceDir,
+      pieceNames: req.pieces,
+      promotedDir: promotedPiecesDir(),
+      fullCatalogDir: fullCatalogDir(),
+      catalogSummaryPath: process.env.CATALOG_SUMMARY ?? DEFAULT_CATALOG_SUMMARY,
+    });
+    // Invalida caches: catalog-summary (nivel 1) se recarga en la próxima lectura;
+    // flow-gate snapshot se vacia (validez de flujos puede cambiar con el nuevo
+    // catalogo). full-catalog se lee por request (sin cache de modulo) -> ok.
+    resetCatalogSummaryCache();
+    invalidateFlowGateSnapshot();
+    return { status: 200, body: result };
+  } catch (e) {
+    return { status: 500, body: { error: `promote failed: ${(e as Error).message}` } };
+  }
 }
 
 export async function handleBuildSources(req: BuildSourcesRequest): Promise<HandlerResult> {

@@ -32,6 +32,8 @@ import {
   handleAgentRun,
   handleDiscoverSources,
   handleBuildSources,
+  handlePromoteSources,
+  type PromoteSourcesRequest,
   handleValidateWorkflow,
   type HandlerResult,
   type ValidateWorkflowRequest,
@@ -98,6 +100,19 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return send(res, { status: 400, body: { error: "body must be valid JSON" } });
       }
       return send(res, handleCreateAdminConnection(parsed));
+    }
+    // POST /admin/promote { sourceDir, pieces:[names] } -> { promoted, rejected }
+    // Promueve pieces importadas (T2) al catalogo vivo (bundles + OKF + summary).
+    // GATEADO por X-Admin-Token (requireAdmin, mismo gate que /admin/* y /sources/*).
+    if (method === "POST" && pathname === "/admin/promote") {
+      const raw = await readBody(req);
+      let parsed: PromoteSourcesRequest;
+      try {
+        parsed = JSON.parse(raw) as PromoteSourcesRequest;
+      } catch {
+        return send(res, { status: 400, body: { error: "body must be valid JSON" } });
+      }
+      return send(res, await handlePromoteSources(parsed));
     }
     return send(res, { status: 404, body: { error: `no admin route for ${method} ${pathname}` } });
   }

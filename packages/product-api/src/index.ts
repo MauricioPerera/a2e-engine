@@ -16,11 +16,19 @@ const HOOK_PIECES = path.join(engineAdapter, 'custom-pieces-hook/dist');
 const TEXTKIT_PIECES = path.join(engineAdapter, 'custom-pieces-textkit/dist');
 const SHELL_PIECES = path.join(engineAdapter, 'custom-pieces-shell/dist');
 
+// Promoted pieces: bundles de pieces importadas (T2) promovidas al catalogo
+// vivo via POST /admin/promote. El engine las carga en ejecucion (el piece-loader
+// lee AP_CUSTOM_PIECES_PATHS fresco en cada llamada -> promover en runtime SIN
+// restart las hace ejecutables). Dir via env PROMOTED_PIECES_DIR; default al
+// promoted-pieces de engine-adapter. Idempotente: re-promover misma version
+// sobreescribe el mismo layout (pieces/@scope/piece-name-VERSION/...).
+const PROMOTED_PIECES = process.env.PROMOTED_PIECES_DIR ?? path.join(engineAdapter, 'promoted-pieces');
+
 export function configureEngineEnv(): void {
   process.env.AP_EXECUTION_MODE = process.env.AP_EXECUTION_MODE ?? 'UNSANDBOXED';
   process.env.AP_PAUSED_FLOW_TIMEOUT_DAYS = process.env.AP_PAUSED_FLOW_TIMEOUT_DAYS ?? '1';
   process.env.AP_CUSTOM_PIECES_PATHS =
-    process.env.AP_CUSTOM_PIECES_PATHS ?? [JSON_PIECES, ECHO_PIECES, HOOK_PIECES, TEXTKIT_PIECES, SHELL_PIECES].join(':');
+    process.env.AP_CUSTOM_PIECES_PATHS ?? [JSON_PIECES, ECHO_PIECES, HOOK_PIECES, TEXTKIT_PIECES, SHELL_PIECES, PROMOTED_PIECES].join(':');
 }
 
 export const PRODUCT_PORT = Number(process.env.PORT ?? '8080');
