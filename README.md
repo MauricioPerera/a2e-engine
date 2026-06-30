@@ -69,7 +69,7 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 | `knowledge-base` | `knowledge-store.ts` — aprendizajes OKF+git con freshness TTL + vigencia humana (`attestEntry`); bucle run-failure→stub. |
 | `trigger-runtime` | `dedup.ts`, `poll-runner.ts` (`startReactivePoll` + modo cron), `cron.ts` (`nextRun`), `cursor-store.ts` (Memory/File durable). |
 | `product-api` | servidor HTTP (`node:http`). Puerto default `:8080` en source; la **imagen Docker** expone `:8088`. Mock backend interno `:3997`. Ver §API HTTP. |
-| `a2e-mcp-server` | servidor **MCP** (stdio y Streamable HTTP, `@modelcontextprotocol/sdk`) con **11 tools** que envuelven los endpoints del product-api. Ver §Integración con LM Studio. |
+| `a2e-mcp-server` | servidor **MCP** (stdio y Streamable HTTP, `@modelcontextprotocol/sdk`) con **12 tools** que envuelven los endpoints del product-api. Ver §Integración con LM Studio. |
 
 **Stack de governance (4 capas):** OKF+git (catálogo·flows·runs·conocimiento) · CCDD (contrato firmado + gate) · freshness (TTL) · vigencia (attestation humana). Ver `docs/ESPECIFICACION-A2E.md`, `docs/ESTANDAR-SEGURIDAD-CATALOGOS-A2E.md`, `docs/CONTRATO-CCDD-A2E.md`.
 
@@ -85,6 +85,7 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 - **Validación pre-flight** antes de ejecutar (step names, refs inter-paso, existencia piece/action, props requeridas).
 - **Triggers reactivos**: polling con cron real + webhooks (`POST /webhooks/:triggerId`, sin API-key — el triggerId es el bearer), dedup con cursor durable.
 - **Run history** (OKF+git, audit/reproduce), **registro de workflows** (guardar/descubrir/re-ejecutar, versionado), **base de conocimiento** (freshness TTL + vigencia humana).
+- **Reuso de flujos validados** (`retrieve_flows`): el agente descubre workflows guardados y los reutiliza en vez de re-componer a ciego — ahorra el costo de razonar/iterar. Dos gates de confianza: **VALIDEZ** (cada flujo se re-valida contra el catálogo ACTUAL de pieces → caza staleness: una piece que cambió o desapareció invalida el flujo) y **SALUD** de los runs enlazados por `workflowId` ("N runs, X% ok, último status"; sin runs → untested). Loop: `retrieve_flows` → si válido + sano → `run_saved_workflow` (barato); si no → componer → ejecutar → `save_workflow` (el catálogo crece/mejora). Enlaza con el bucle run-failure→knowledge.
 - **L3 — runtime assembly**: `POST /agent/context` ensambla el contexto del agente según el contrato CCDD (no-secrets, output-schema, connection-refs, budget).
 - **Backend durable**: vault/store/files sobreviven reinicios (`DATA_DIR`).
 - **Auth por API key** (`X-API-Key` o `Authorization: Bearer`); modo dev abierto si `API_KEYS` no está seteado.
@@ -108,7 +109,9 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 | Ejecución reactiva — webhooks | product-api `/webhooks/:id` | ✅ |
 | Dedup con cursor durable | trigger-runtime `FileCursorStore` | ✅ |
 | API HTTP del producto | product-api | ✅ |
-| **Servidor MCP** (11 tools, stdio + HTTP) | a2e-mcp-server | ✅ |
+| **Servidor MCP** (12 tools, stdio + HTTP) | a2e-mcp-server | ✅ |
+| **Reuso de flujos** (`retrieve_flows`, validez + salud) | workflow-registry + run-logger | ✅ |
+| **Pieces de comando / capacidades declaradas** (`executes-code`) | piece-sdk + piece-source-manager | ✅ |
 | **Run history** (OKF+git, audit/reproduce) | run-logger | ✅ |
 | **Registro de workflows** (guardar/descubrir/re-ejecutar, versionado) | workflow-registry | ✅ |
 | **Base de conocimiento** (freshness TTL + vigencia humana) | knowledge-base | ✅ |
@@ -119,6 +122,19 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 | **Catálogos aislados + sandbox bwrap** (build de pieces no confiables) | piece-sdk + piece-source-manager | ✅ |
 | **Backend durable** (vault/store/files sobreviven reinicio) | backend-mock `Durable*` (env `DATA_DIR`) | ✅ |
 | Auth por API-key | product-api (env `API_KEYS`) | ✅ |
+
+### Pieces de comando / capacidades declaradas
+
+En vez de dar al agente **shell arbitrario**, se le exponen **actions de terminal deterministas y acotadas** (allowlist / acciones específicas) que se ejecutan vía `execFile` **sin shell** → sin inyección de comandos. Deterministas, validables, auditables, composables como un step más del workflow.
+
+El `piece-sdk` trata `executes-code` como una **capacidad declarada y gateada** (no un error duro), igual que `egress`/`env`/`file`:
+
+- Si la piece **declara** `executesCode` en su `piece-manifest.json` → **warn** (`executes-code`, operator-vetted) y `ok:true` (no bloquea el import).
+- Si **NO la declara** y el código ejecuta (`child_process`, `spawn`, `eval`, `new Function`, `execSync`…) → **error** `undeclared-executes-code` (`ok:false`).
+
+**Honestidad:** el análisis estático es **señal, no garantía** (evadible por ofuscación). La contención real de código no confiable sigue siendo el **sandbox bwrap del import T2** (`/sources/build`): sin red, FS confinado, límites CPU/mem. La declaración de capacidades hace que el operador **vea** qué hace una piece al importarla.
+
+**Estándar de repos de pieces:** `a2e-pieces-<categoria>`. El primero es **[`a2e-pieces-cmd`](https://github.com/MauricioPerera/a2e-pieces-cmd)** — pieces de comando (shell/git/sqlite) como actions deterministas. Importable vía el flujo T2.
 
 **Pendiente (opcional):** escaneo SCA sobre el set final de pieces; backend durable a DB/Redis/S3 (hoy file-backed); L3 parseo real de `context.yaml`.
 
@@ -137,6 +153,7 @@ GET  /pieces/:name                             → OKF de una piece (actions/tri
 POST /execute                                  → { steps:[...] } → ejecuta; validación pre-flight (400 si inválido)
 POST /workflows/validate                       → valida un workflow sin ejecutarlo
 POST /workflows · GET /workflows · GET /workflows/:id · POST /workflows/:id/execute  → registro de workflows
+GET  /flows/retrieve?q=&budget=                    → reuso: workflows guardados relevantes, con gates de VALIDEZ (re-valida vs catálogo actual) y SALUD (runs por workflowId)
 GET  /runs · GET /runs/:date/:runId            → run history (OKF+git)
 GET  /connections?projectId=&piece=&format=&budget=  → referencias de credenciales (nunca secretos)
 POST /admin/connections                        → canal ADMIN: carga credencial en el vault (header X-Admin-Token)
@@ -181,9 +198,9 @@ El agente solo emite **referencias** de credenciales (`{{connections['name']}}`)
 
 ## Integración con LM Studio (MCP)
 
-El paquete `a2e-mcp-server` expone **11 tools** sobre el product-api para que un LLM con tool-calling componga y ejecute workflows A2E, descubra pieces, liste referencias de credenciales (sin secretos) y consulte knowledge/runs — **sin escribir código ni ver secretos**.
+El paquete `a2e-mcp-server` expone **12 tools** sobre el product-api para que un LLM con tool-calling componga y ejecute workflows A2E, descubra pieces, liste referencias de credenciales (sin secretos) y consulte knowledge/runs — **sin escribir código ni ver secretos**.
 
-**Tools:** `retrieve_catalog`, `retrieve_pieces`, `retrieve_actions`, `get_piece`, `list_connections`, `execute_workflow`, `save_workflow`, `list_workflows`, `run_saved_workflow`, `query_knowledge`, `query_runs`.
+**Tools:** `retrieve_catalog`, `retrieve_pieces`, `retrieve_actions`, `get_piece`, `list_connections`, `execute_workflow`, `save_workflow`, `list_workflows`, `run_saved_workflow`, **`retrieve_flows`** (descubre workflows guardados para reuso, con gates de validez+salud), `query_knowledge`, `query_runs`.
 
 Dos formas de conectarlo:
 
@@ -232,7 +249,7 @@ O tras `wsl.exe` para LM Studio local (ver `packages/a2e-mcp-server/MCP-SETUP.md
 ### Verificar el handshake (sin LM Studio)
 ```bash
 cd ~/product/packages/a2e-mcp-server && node handshake-test.mjs
-# Esperado: ALL PASS — 11 tools, primer byte stdout = 0x7B ('{'), serverInfo = a2e-mcp-server 0.1.0
+# Esperado: ALL PASS — 12 tools, primer byte stdout = 0x7B ('{'), serverInfo = a2e-mcp-server 0.1.0
 ```
 Detalle: `packages/a2e-mcp-server/MCP-SETUP.md`.
 
@@ -272,7 +289,7 @@ Workflow **guardado** para reuso. El agente **descubrió → compuso → encaden
 | | n8n | A2E |
 |---|---|---|
 | Primero | humano (human-first) | agente (agent-first) |
-| El agente lo usa vía | MCP de retrofit | MCP nativo (11 tools, por diseño) |
+| El agente lo usa vía | MCP de retrofit | MCP nativo (12 tools, por diseño) |
 | Nodo `code` | sí (el agente puede escribir código SDK) | **no**, por diseño (JSON declarativo) |
 | Governance | débil (hay humano en el loop) | CCDD + sandbox + secrets-by-reference (no hay humano en el loop) |
 | UI | sí, es el centro | no existe (API-only); la UI sería un síntoma |

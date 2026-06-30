@@ -114,6 +114,8 @@ Por eso **no se incluye en la imagen Docker** (la toolchain AP pesa ~3GB y `bwra
 
 Ambos endpoints se gatean con `X-Admin-Token` (`ADMIN_TOKEN`), **no** con la API key del agente — un agente con `X-API-Key` nunca los alcanza.
 
+**Capacidades declaradas en el build:** `/sources/build` lee el `piece-manifest.json` de cada piece (si existe) y lo pasa al `piece-sdk` para la validación. Así se respetan las capacidades **declaradas**: si la piece declara `executesCode` (ej. pieces de comando como `a2e-pieces-cmd`), el finding `executes-code` viaja como **warn no bloqueante** (`ok:true`) **en la respuesta del build** — el operador VE al importar la piece que ésta ejecuta comandos. Si ejecuta código **sin** declarar la capacidad → error `undeclared-executes-code` (`ok:false`, el build falla). Ídem para `egress`/`env`/`file`. El análisis estático es señal (evadible por ofuscación); la contención real del código no confiable la da el **sandbox bwrap** de este mismo flujo.
+
 ---
 
 ## 5. Build-from-source en VPS (avanzado)
