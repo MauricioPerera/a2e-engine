@@ -107,6 +107,10 @@ export type FlowWithGate = {
   flow: WorkflowRecord;
   valid: boolean;
   health: FlowHealth;
+  // Findings de la re-validación contra el catálogo actual (gate de VALIDEZ).
+  // El wiring los computa una vez al construir el snapshot; retrieveFlows los
+  // reusa para renderizar el motivo de invalidez sin re-validar por request.
+  findings: WfFinding[];
 };
 
 // Recorre el árbol de steps del flow y devuelve las claves

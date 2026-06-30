@@ -30,7 +30,6 @@ import {
   flowRunFromResult,
   listRuns,
   getRun,
-  listAllRuns,
 } from "../../run-logger/src/run-store.js";
 import {
   addEntry,
@@ -45,17 +44,18 @@ import {
   listWorkflows,
   getWorkflow,
   getIndexMarkdown,
-  listWorkflowRecords,
 } from "../../workflow-registry/src/workflow-store.js";
 import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
 import {
   retrieveFlows,
   buildFlowsByAction,
-  computeFlowHealth,
   renderFlowHealth,
   type FlowRef,
 } from "../../workflow-registry/src/retrieve-flows.js";
-import type { FlowRun } from "../../run-logger/src/run-logger.js";
+import {
+  getFlowGateSnapshot,
+  invalidateFlowGateSnapshot,
+} from "./flow-gate-cache.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID, getVault } from "./mock-backend.js";
 import type { AppConnectionValue } from "../../backend-mock/src/vault.js";
@@ -144,6 +144,11 @@ async function recordRunBestEffort(args: {
       ...(args.workflowId ? { workflowId: args.workflowId } : {}),
     });
     await appendRun(run, { repoDir: RUNS_REPO });
+    // INVALIDACIÓN DE CACHE: un run nuevo cambia la salud de su workflow -> el
+    // snapshot del gate (flow-gate-cache) queda stale. Lo vacía para que la
+    // próxima lectura (retrieve_flows / NIVEL 3) reconstruya con datos frescos.
+    // Crítico para los smokes: guardan+ejecutan+consultan en la misma corrida.
+    invalidateFlowGateSnapshot();
     // BUCLE APRENDIZAJE: run FAILED -> stub de conocimiento best-effort.
     if (String(run.status).toUpperCase() === "FAILED" && process.env.KNOWLEDGE_REPO !== undefined) {
       try {
@@ -562,27 +567,17 @@ export async function handlePieceActions(
 }
 
 // Computa el gate (validez + salud) de los flujos guardados UNA vez y construye
-// el índice inverso action -> FlowRef[] (puro). Reusa exactamente el mismo gate
-// que handleRetrieveFlows: listWorkflowRecords (steps[]), runs reales agrupados
-// por workflowId, re-validación contra el catálogo actual (validateWorkflowCore)
-// y computeFlowHealth. Best-effort: repo vacío o ausente -> índice vacío.
+// el índice inverso action -> FlowRef[] (puro). Reusa el SNAPSHOT cacheado del
+// gate (flow-gate-cache): listWorkflowRecords + listAllRuns + re-validación
+// contra el catálogo (validateWorkflowCore) + computeFlowHealth se computan UNA
+// vez por ventana de cache y lo comparten este path y handleRetrieveFlows — sin
+// releer disco por request. Best-effort: repo vacío/ausente -> snapshot vacío ->
+// índice vacío (el .catch del caller sigue tratándolo como índice vacío).
 async function buildFlowsByActionIndex(): Promise<Map<string, FlowRef[]>> {
-  const flows = await listWorkflowRecords({ repoDir: WORKFLOWS_REPO });
-  const runs = await listAllRuns({ repoDir: RUNS_REPO });
-  const runsByWorkflow: Record<string, FlowRun[]> = {};
-  for (const r of runs) {
-    if (!r.workflowId) continue;
-    (runsByWorkflow[r.workflowId] ??= []).push(r);
-  }
-  const validate = (wf: WorkflowRecord) =>
-    validateWorkflowCore({ steps: wf.steps } as ExecuteRequest, PROJECT_ID);
-  const flowsWithGate = flows.map((flow) => {
-    const v = validate(flow);
-    const valid = !!(v && v.ok);
-    const health = computeFlowHealth(runsByWorkflow[flow.id] ?? [], flow.id);
-    return { flow, valid, health };
-  });
-  return buildFlowsByAction(flowsWithGate);
+  const snapshot = await getFlowGateSnapshot((wf) =>
+    validateWorkflowCore({ steps: wf.steps } as ExecuteRequest, PROJECT_ID),
+  );
+  return buildFlowsByAction(snapshot.flowsWithGate);
 }
 
 // Ejecuta un action YA CONSTRUIDO contra el engine, registra el run en el
@@ -859,6 +854,12 @@ export async function handleCreateWorkflow(req: CreateWorkflowRequest): Promise<
   } catch (e) {
     return { status: 500, body: { error: `save failed: ${(e as Error).message}` } };
   }
+  // INVALIDACIÓN DE CACHE: un workflow nuevo/editado cambia el conjunto de
+  // flujos (y su validez contra el catálogo) -> el snapshot del gate
+  // (flow-gate-cache) queda stale. Lo vacía para que la próxima lectura
+  // (retrieve_flows / NIVEL 3) reconstruya con datos frescos. Crítico para los
+  // smokes: guardan+ejecutan+consultan en la misma corrida.
+  invalidateFlowGateSnapshot();
   return { status: 201, body: { id: wf.id, version: saved.version, path: saved.path } };
 }
 
@@ -902,33 +903,36 @@ export async function handleExecuteWorkflow(id: string): Promise<HandlerResult> 
 }
 
 // GET /flows/retrieve?q=<query>&budget=<maxTokens> -> descubrimiento/reuso de
-// WORKFLOWS guardados con gates de confianza (VALIDEZ + SALUD). Lee los
-// workflows guardados (listWorkflowRecords: con steps[]), los runs reales
-// (listAllRuns: con workflowId parseado), agrupa runs por workflowId, re-valida
-// cada flow contra el catálogo ACTUAL (validateWorkflowCore: estructura +
-// contexto) y delega a retrieveFlows (score + validate + health + render OKF
-// acotado al budget). El agente lo usa ANTES de componer, para reusar flujos
+// WORKFLOWS guardados con gates de confianza (VALIDEZ + SALUD). Usa el SNAPSHOT
+// cacheado del gate (flow-gate-cache): listWorkflowRecords + listAllRuns +
+// re-validación contra el catálogo (validateWorkflowCore) se computan UNA vez
+// por ventana de cache y lo comparten este path y buildFlowsByActionIndex — sin
+// releer disco por request. retrieveFlows recibe flows + runsByWorkflow del
+// snapshot y un `validate` que REUSA el gate ya computado en flowsWithGate (mapa
+// flow.id -> {ok, findings}) en vez de re-llamar validateWorkflowCore: así no se
+// duplica la validación. El agente lo usa ANTES de componer, para reusar flujos
 // válidos+sanos en vez de re-componer desde cero.
 export async function handleRetrieveFlows(
   query: string,
   budget: number | undefined,
 ): Promise<HandlerResult> {
-  const flows = await listWorkflowRecords({ repoDir: WORKFLOWS_REPO });
-  const runs = await listAllRuns({ repoDir: RUNS_REPO });
-  // Agrupa runs por workflowId (retrieve-flows espera un map; un flow sin
-  // entrada = no probado -> health "0 runs (untested)").
-  const runsByWorkflow: Record<string, FlowRun[]> = {};
-  for (const r of runs) {
-    if (!r.workflowId) continue;
-    (runsByWorkflow[r.workflowId] ??= []).push(r);
+  const snapshot = await getFlowGateSnapshot((wf) =>
+    validateWorkflowCore({ steps: wf.steps } as ExecuteRequest, PROJECT_ID),
+  );
+  // Reusa el gate ya computado en el snapshot (flow.id -> {ok, findings}) para
+  // que retrieveFlows NO re-valide por request. Fallback defensivo a
+  // validateWorkflowCore si un flow no estuviera en el mapa (no debería ocurrir:
+  // snapshot.flowsWithGate cubre exactamente snapshot.flows).
+  const gateByFlowId = new Map<string, { ok: boolean; findings: WfFinding[] }>();
+  for (const fg of snapshot.flowsWithGate) {
+    gateByFlowId.set(fg.flow.id, { ok: fg.valid, findings: fg.findings });
   }
-  // Gate de VALIDEZ: re-valida el flow contra el catálogo ACTUAL. Un flow
-  // guardado puede haber quedado stale (pieces que cambiaron o se borraron).
   const validate = (wf: WorkflowRecord) =>
+    gateByFlowId.get(wf.id) ??
     validateWorkflowCore({ steps: wf.steps } as ExecuteRequest, PROJECT_ID);
   const result = retrieveFlows({
-    flows,
-    runsByWorkflow,
+    flows: snapshot.flows,
+    runsByWorkflow: snapshot.runsByWorkflow,
     validate,
     query,
     budget: budget ?? 4000,
