@@ -22,6 +22,7 @@ import { tokenize } from "../../okf-retriever/src/two-level.js";
 import {
   extractPiecesUsed,
   type WorkflowRecord,
+  type WorkflowStep,
 } from "./workflow-registry.js";
 import type { FlowRun } from "../../run-logger/src/run-logger.js";
 import type { WfValidation, WfFinding } from "../../flow-builder/src/validate-workflow-context.js";
@@ -76,6 +77,98 @@ export function computeFlowHealth(runs: FlowRun[], workflowId: string): FlowHeal
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   const lastSuccessAt = successes.length > 0 ? successes[successes.length - 1].startedAt : "";
   return { total, succeeded, failed, lastStatus, lastSuccessAt, successRate: succeeded / total };
+}
+
+// --- NIVEL 3: índice inverso action -> flows (recetas que la usan) ----------
+//
+// El descubrimiento de actions (nivel 2) ahora adjunta, por action, los flujos
+// guardados VALIDOS y SANOS que la usan: así el agente, al buscar una action
+// útil, descubre una receta probada que la ejercita. El gate (validez + salud)
+// lo computa el wiring (igual que retrieveFlows) y se pasa ya computado; aquí
+// sólo se indexa (puro, sin red/FS/Date).
+
+/**
+ * Referencia a un flujo guardado con su gate ya computado: id, name, validez y
+ * salud agregada. Es el valor del índice inverso `${pieceName}:${actionName}`.
+ */
+export type FlowRef = {
+  id: string;
+  name: string;
+  validity: "valid" | "invalid";
+  health: FlowHealth;
+};
+
+/**
+ * Flujo + gate (validez + salud) ya computados por el wiring. Entrada de
+ * buildFlowsByAction: el wiring re-valida contra el catálogo actual (validez) y
+ * agrega runs por workflowId (salud), igual que retrieveFlows.
+ */
+export type FlowWithGate = {
+  flow: WorkflowRecord;
+  valid: boolean;
+  health: FlowHealth;
+};
+
+// Recorre el árbol de steps del flow y devuelve las claves
+// `${pieceName}:${actionName}` únicas (dedupe por flujo: dos steps con la misma
+// action indexan el flujo una sola vez bajo esa clave). Visita branches, loop
+// y fallback como collectPieces/extractPiecesUsed (mismo criterio de árbol).
+function flowActionKeys(flow: WorkflowRecord): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  const visit = (step: WorkflowStep): void => {
+    if (step.pieceName && step.actionName) {
+      const k = `${step.pieceName}:${step.actionName}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        order.push(k);
+      }
+    }
+    if (step.steps) for (const s of step.steps) visit(s);
+    for (const b of step.branches ?? []) for (const s of b.steps ?? []) visit(s);
+    if (step.fallback) for (const s of step.fallback.steps ?? []) visit(s);
+  };
+  for (const s of flow.steps) visit(s);
+  return order;
+}
+
+// Comparador de refs por salud desc: mayor successRate primero; null (no
+// probado) último; empate -> más runs; empate -> por name estable. Pre-ordena
+// cada lista del índice para que el caller sólo haga .slice(0, K).
+function byHealthDesc(a: FlowRef, b: FlowRef): number {
+  const ar = a.health.successRate ?? -1;
+  const br = b.health.successRate ?? -1;
+  if (br !== ar) return br - ar;
+  if (b.health.total !== a.health.total) return b.health.total - a.health.total;
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
+/**
+ * Construye el índice inverso action -> flows (puro). Para cada flujo VALIDO
+ * (los inválidos/stale se EXCLUYEN: no son receta confiable), y por cada step
+ * (pieceName, actionName) de su árbol, indexa el flujo bajo
+ * `${pieceName}:${actionName}`. SOLO válidos: un flujo válido basta (cubre el
+ * caso "al menos válido" aunque no tenga runs; un inválido nunca se indexa).
+ *
+ * Cada lista queda pre-ordenada por salud desc (byHealthDesc), así el caller
+ * (handlePieceActions) toma los top-K más sanos con un simple slice. Devuelve un
+ * Map vacío si no hay flujos válidos -> el nivel 3 no añade coste (esparso).
+ */
+export function buildFlowsByAction(
+  flowsWithGate: FlowWithGate[],
+): Map<string, FlowRef[]> {
+  const index = new Map<string, FlowRef[]>();
+  for (const { flow, valid, health } of flowsWithGate) {
+    if (!valid) continue; // excluye inválidos/stale: no son receta confiable
+    const ref: FlowRef = { id: flow.id, name: flow.name, validity: "valid", health };
+    for (const key of flowActionKeys(flow)) {
+      const list = index.get(key);
+      if (list) list.push(ref);
+      else index.set(key, [ref]);
+    }
+  }
+  for (const list of index.values()) list.sort(byHealthDesc);
+  return index;
 }
 
 /**
@@ -133,7 +226,9 @@ function invalidReason(findings: WfFinding[]): string {
 }
 
 // Render compacto de la salud: "0 runs (untested)" o "N runs, X% ok, last STATUS".
-function renderHealth(h: FlowHealth): string {
+// Exportado para que el handler del nivel 3 (handlePieceActions) reutilice el
+// MISMO string de salud al adjuntar flujos a una action (receta válida+sana).
+export function renderFlowHealth(h: FlowHealth): string {
   if (h.total === 0) return "0 runs (untested)";
   const pct = Math.round((h.successRate ?? 0) * 100);
   return `${h.total} runs, ${pct}% ok, last ${h.lastStatus}`;
@@ -148,7 +243,7 @@ function renderFlowBlock(r: RankedFlow): string {
   const pieces = extractPiecesUsed(f.steps);
   lines.push(`pieces: ${pieces.length > 0 ? pieces.join(", ") : "(none)"}`);
   lines.push(`validity: ${r.valid ? "valid" : `invalid — ${invalidReason(r.findings)}`}`);
-  lines.push(`health: ${renderHealth(r.health)}`);
+  lines.push(`health: ${renderFlowHealth(r.health)}`);
   return lines.join("\n");
 }
 

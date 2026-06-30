@@ -48,7 +48,13 @@ import {
   listWorkflowRecords,
 } from "../../workflow-registry/src/workflow-store.js";
 import type { WorkflowRecord, WorkflowStep } from "../../workflow-registry/src/workflow-registry.js";
-import { retrieveFlows } from "../../workflow-registry/src/retrieve-flows.js";
+import {
+  retrieveFlows,
+  buildFlowsByAction,
+  computeFlowHealth,
+  renderFlowHealth,
+  type FlowRef,
+} from "../../workflow-registry/src/retrieve-flows.js";
 import type { FlowRun } from "../../run-logger/src/run-logger.js";
 import { demoPieces } from "./pieces-catalog.js";
 import { MOCK_PORT, ENGINE_TOKEN, PROJECT_ID, getVault } from "./mock-backend.js";
@@ -495,34 +501,88 @@ function spliceActionsSection(base: string, actionsSection: string): string {
   return base.slice(0, startIdx) + actionsSection + base.slice(endIdx);
 }
 
-// NIVEL 2: las actions DE UNA piece (con props), filtradas por query y acotadas
-// a su propio budget. Lista la UNION de full-catalog (action.md) + demoPieces
-// (pieces custom bundled), así una pieza custom que SÓLO está en demoPieces
-// (echo, textkit) es descubrible por retrieve_actions sin action.md manual.
+// NIVEL 2 (+ NIVEL 3): las actions DE UNA piece (con props), filtradas por query
+// y acotadas a su propio budget. Lista la UNION de full-catalog (action.md) +
+// demoPieces (pieces custom bundled), así una pieza custom que SÓLO está en
+// demoPieces (echo, textkit) es descubrible por retrieve_actions sin action.md
+// manual.
+//
+// NIVEL 3 (recetas): ANTES de renderizar, computa UNA vez el gate (validez +
+// salud) de los flujos guardados — igual que handleRetrieveFlows:
+// listWorkflowRecords + runs agrupados por workflowId + re-validar contra el
+// catálogo actual (validateWorkflowCore) + computeFlowHealth — y construye el
+// índice inverso buildFlowsByAction. Para cada action de esta piece, adjunta los
+// flujos válidos+sanos cuyo `${piece}:${action}` matchea (top-K más sanos por
+// successRate), acotado por el MISMO budget del endpoint (los flujos viven dentro
+// del bloque de cada action -> retrieveActions los trimma vía estimateTokens).
+// El render de cada action (renderActionDetail) añade la sección "flows que la
+// usan" sólo si hay flujos; sin flujos, no añade nada (esparso, sin coste).
 // GET /catalog/pieces/:name/actions?q=&budget= -> { context, included, total, omitted, estimatedTokens }.
 // 404 claro si la piece no existe en NINGUNA fuente.
-export function handlePieceActions(
+export async function handlePieceActions(
   name: string,
   query: string | undefined,
   budget: number | undefined,
-): HandlerResult {
+): Promise<HandlerResult> {
   const actions = unionPieceActions(name);
   if (!actions) {
     return { status: 404, body: { error: `piece not found: ${name}` } };
   }
   const maxTokens = budget && budget > 0 ? budget : 2000;
   const hasQuery = query !== undefined && query.trim().length > 0;
-  const result = retrieveActions(actions, query, { maxTokens });
+
+  // NIVEL 3: índice inverso action -> flujos válidos+sanos. Best-effort: si el
+  // repo de workflows/runs falla (ej. no inicializado), se trata como índice
+  // vacío -> el nivel 2 sigue igual (sin recetas adjuntas), nunca rompe.
+  const flowsByAction = await buildFlowsByActionIndex().catch(() => new Map<string, FlowRef[]>());
+  const TOP_K = 2;
+  const enriched: ActionDetail[] = actions.map((a) => {
+    const refs = flowsByAction.get(`${name}:${a.name}`);
+    if (!refs || refs.length === 0) return a; // esparso: sin flujos, action intacta
+    const flows = refs.slice(0, TOP_K).map((r) => ({
+      id: r.id,
+      name: r.name,
+      validity: r.validity,
+      health: renderFlowHealth(r.health),
+    }));
+    return { ...a, flows };
+  });
+
+  const result = retrieveActions(enriched, query, { maxTokens });
   // FALLBACK anti-ceguera: si hubo query pero el scoring no incluyó NINGUNA
   // action (query no-coincidente, ej "all actions" que no aparece en ningún
   // name/description), listar TODAS las actions de la piece (acotado por budget)
   // en vez de devolver {included:[], total:0} y dejar al agente sin nombres de
   // props. Sin query ya lista todas (comportamiento conservado); este fallback
   // sólo dispara cuando la query matchea a nadie y la piece tiene actions.
-  if (hasQuery && result.included.length === 0 && actions.length > 0) {
-    return { status: 200, body: retrieveActions(actions, undefined, { maxTokens }) };
+  if (hasQuery && result.included.length === 0 && enriched.length > 0) {
+    return { status: 200, body: retrieveActions(enriched, undefined, { maxTokens }) };
   }
   return { status: 200, body: result };
+}
+
+// Computa el gate (validez + salud) de los flujos guardados UNA vez y construye
+// el índice inverso action -> FlowRef[] (puro). Reusa exactamente el mismo gate
+// que handleRetrieveFlows: listWorkflowRecords (steps[]), runs reales agrupados
+// por workflowId, re-validación contra el catálogo actual (validateWorkflowCore)
+// y computeFlowHealth. Best-effort: repo vacío o ausente -> índice vacío.
+async function buildFlowsByActionIndex(): Promise<Map<string, FlowRef[]>> {
+  const flows = await listWorkflowRecords({ repoDir: WORKFLOWS_REPO });
+  const runs = await listAllRuns({ repoDir: RUNS_REPO });
+  const runsByWorkflow: Record<string, FlowRun[]> = {};
+  for (const r of runs) {
+    if (!r.workflowId) continue;
+    (runsByWorkflow[r.workflowId] ??= []).push(r);
+  }
+  const validate = (wf: WorkflowRecord) =>
+    validateWorkflowCore({ steps: wf.steps } as ExecuteRequest, PROJECT_ID);
+  const flowsWithGate = flows.map((flow) => {
+    const v = validate(flow);
+    const valid = !!(v && v.ok);
+    const health = computeFlowHealth(runsByWorkflow[flow.id] ?? [], flow.id);
+    return { flow, valid, health };
+  });
+  return buildFlowsByAction(flowsWithGate);
 }
 
 // Ejecuta un action YA CONSTRUIDO contra el engine, registra el run en el

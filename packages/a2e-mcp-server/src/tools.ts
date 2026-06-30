@@ -323,7 +323,12 @@ export const tools: ToolDefinition[] = [
     description:
       "Level-2 hierarchical retrieval: the actions of ONE piece (WITH input props), filtered " +
       "by an optional query and bounded by a token budget. Call this after retrieve_pieces to " +
-      "drill into a specific piece before composing a workflow step. GET /catalog/pieces/:name/actions.",
+      "drill into a specific piece before composing a workflow step. Each action may also list " +
+      "the SAVED, VALID and HEALTHY workflows that use it (reusable recipes): a flow is included " +
+      "only if it is re-validated against the current catalog (validity: valid) and aggregates run " +
+      "history by workflow id (health: N runs, X% ok, last status), so you can reuse a proven flow " +
+      "that exercises the action instead of recomposing from scratch. Actions with no matching flow " +
+      "list nothing (sparse, no token cost). GET /catalog/pieces/:name/actions.",
     inputSchema: {
       type: "object",
       properties: {

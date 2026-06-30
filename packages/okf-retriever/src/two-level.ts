@@ -10,7 +10,25 @@
 import { estimateTokens, scorePiece, type PieceSummary } from './okf-retriever.js';
 
 /**
- * Detalle de una action: metadatos + props estructuradas.
+ * Referencia a un flujo guardado (NIVEL 3: recetas que usan esta action).
+ * Tipo LOCAL y autocontenido: el handler de product-api lo rellena a partir
+ * del FlowRef de workflow-registry (id/name/validity) + un string de salud
+ * pre-renderizado (ej. "2 runs, 100% ok, last SUCCEEDED"). Así two-level NO
+ * depende de workflow-registry (que ya importa de okf-retriever) y no se crea
+ * un ciclo de capas. La action lo lleva sólo si hay flujos; sin flujos, nada.
+ */
+export type ActionFlowRef = {
+  id: string;
+  name: string;
+  validity: string;
+  health: string;
+};
+
+/**
+ * Detalle de una action: metadatos + props estructuradas. `flows` es opcional
+ * (NIVEL 3): flujos guardados válidos+sanos que usan esta action, adjuntos por
+ * el handler de product-api vía índice inverso. Ausente/vacío -> el render NO
+ * añade nada (esparso, sin coste de tokens).
  */
 export type ActionDetail = {
   name: string;
@@ -18,6 +36,7 @@ export type ActionDetail = {
   description: string;
   requireAuth?: boolean;
   props?: { name: string; type: string; required: boolean; description?: string }[];
+  flows?: ActionFlowRef[];
 };
 
 /**
@@ -170,18 +189,30 @@ export function scoreAction(a: ActionDetail, terms: string[]): number {
 
 /**
  * Renderiza el detalle de nivel 2 de una action: cabecera + descripción +
- * tabla de props. Si no hay props, "_no props_".
+ * tabla de props. Si no hay props, "_no props_". Si la action lleva `flows`
+ * (NIVEL 3: recetas guardadas válidas+sanas que la usan), añade una sección
+ * "flows que la usan:" con una línea por flujo ("  - [id] name (validity, health)").
+ * Sin flujos -> no añade nada (esparso, sin coste), preservando el render de
+ * nivel 2 exacto para quien no enganche el índice inverso.
  */
 export function renderActionDetail(a: ActionDetail): string {
   const head = `### ${a.name}`;
   const body = a.description;
+  const lines: string[] = [head, body];
   if (!a.props || a.props.length === 0) {
-    return `${head}\n${body}\n_no props_`;
+    lines.push('_no props_');
+  } else {
+    lines.push('| prop | type | required |');
+    lines.push('|------|------|----------|');
+    for (const p of a.props) lines.push(`| ${p.name} | ${p.type} | ${p.required} |`);
   }
-  const header = '| prop | type | required |';
-  const sep = '|------|------|----------|';
-  const rows = a.props.map((p) => `| ${p.name} | ${p.type} | ${p.required} |`);
-  return `${head}\n${body}\n${header}\n${sep}\n${rows.join('\n')}`;
+  if (a.flows && a.flows.length > 0) {
+    lines.push('flows que la usan:');
+    for (const f of a.flows) {
+      lines.push(`  - [${f.id}] ${f.name} (${f.validity}, ${f.health})`);
+    }
+  }
+  return lines.join('\n');
 }
 
 /**

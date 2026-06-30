@@ -196,7 +196,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const q = url.searchParams.get("q") ?? undefined;
       const budgetRaw = url.searchParams.get("budget");
       const budget = budgetRaw ? Number(budgetRaw) : undefined;
-      return send(res, handlePieceActions(pieceName, q, budget));
+      return send(res, await handlePieceActions(pieceName, q, budget));
     }
   }
 
