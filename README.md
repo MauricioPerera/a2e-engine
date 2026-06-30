@@ -55,7 +55,7 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 | Paquete | Rol |
 |---|---|
 | `engine-adapter` | `build-engine.mjs` (bundle esbuild → `dist/engine.cjs`), `execute-flow.cjs` (flowExecutor in-process), `build-piece.mjs` (bundler genérico), `gen-full-catalog.ts`+`load-one-piece.mjs`, `full-catalog/` (710 pieces), pieces propias (`@automators/piece-*`) |
-| `okf-retriever` | descubrimiento por **OKF** (Open Knowledge Format: markdown+frontmatter+index, navegación estructural, **sin vectores/RAG**). Retriever de **dos niveles** acotado por budget: nivel piece (índice) + nivel actions dentro de la piece. Medido: volcado naive ~435K tokens vs provider ~3K (reducción ~124x) → la saturación de contexto **no es riesgo real**. Provider `okf_catalog`. |
+| `okf-retriever` | descubrimiento por **OKF** (Open Knowledge Format: markdown+frontmatter+index, navegación estructural, **sin vectores/RAG**). Retriever de **tres niveles** acotado por budget: nivel piece (índice) + nivel actions dentro de la piece + nivel flujos validados que usan cada action (sección "flows que la usan", índice inverso del `workflow-registry` adjunto por el handler). Medido: volcado naive ~435K tokens vs provider ~3K (reducción ~124x) → la saturación de contexto **no es riesgo real**. Provider `okf_catalog`. |
 | `okf-generator` | `generateOkfCatalog(pieces)` → catálogo OKF (markdown+frontmatter); muestra todas las actions |
 | `backend-mock` | credenciales en **Vault cifrado (AES-256-GCM)** + SQLite durable (`node:sqlite`). El motor los pide por HTTP a `internalApiUrl` → backend-mock (vault + KV + files). Sobrevive a reinicios (`DATA_DIR`). |
 | `flow-builder` | construye el flow AP desde el request del agente (`buildFlowFromRequest`, `buildPieceStep`, `buildRouterStep` con 24 operadores, `buildLoopStep`, `connectionRef`, `validateActionInput`). Incluye **`sanitize-steps`** (auto-sanitiza nombres de paso inválidos + reescribe refs) y **validación pre-flight** (`validate-workflow.ts` + `validate-workflow-context.ts`: step names, refs entre pasos, existencia piece/action, props requeridas). |
@@ -77,7 +77,7 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 
 ## Features (verificado)
 
-- **Descubrimiento OKF de 2 niveles (sin RAG)**, acotado por budget — nivel piece + nivel actions dentro de la piece. Catálogo de 710 conectores.
+- **Descubrimiento OKF de 3 niveles (sin RAG)**, acotado por budget — nivel piece (índice) + nivel actions dentro de la piece + nivel **flujos validados que usan cada action**. Descubrimiento **fractal**: piece → action → receta probada que la usa; el agente, buscando una action útil, descubre ahí mismo un flujo reusable. Catálogo de 710 conectores. (Ver §Descubrimiento de 3 niveles.)
 - **Ejecución multi-step** con datos encadenados `{{step.output}}` (refs inter-paso resueltas por el engine).
 - **Pieces propias vía SDK** (`piece-sdk`: `validatePiece` + `testPieceAction`) en catálogos aislados. Ejemplo: `@automators/piece-textkit` (action `reverse_text`). `get_piece` y `retrieve_actions` unen **demoPieces + full-catalog** → toda piece custom es descubrible **y** ejecutable.
 - **Credenciales por referencia** `{{connections['name']}}` (vault cifrado AES-256-GCM; el agente nunca ve secretos) + **canal admin**: `POST /admin/connections` con header `X-Admin-Token` (env `ADMIN_TOKEN`), **separado del plano del agente**. Sin `ADMIN_TOKEN` → admin deshabilitado (404).
@@ -85,10 +85,41 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 - **Validación pre-flight** antes de ejecutar (step names, refs inter-paso, existencia piece/action, props requeridas).
 - **Triggers reactivos**: polling con cron real + webhooks (`POST /webhooks/:triggerId`, sin API-key — el triggerId es el bearer), dedup con cursor durable.
 - **Run history** (OKF+git, audit/reproduce), **registro de workflows** (guardar/descubrir/re-ejecutar, versionado), **base de conocimiento** (freshness TTL + vigencia humana).
-- **Reuso de flujos validados** (`retrieve_flows`): el agente descubre workflows guardados y los reutiliza en vez de re-componer a ciego — ahorra el costo de razonar/iterar. Dos gates de confianza: **VALIDEZ** (cada flujo se re-valida contra el catálogo ACTUAL de pieces → caza staleness: una piece que cambió o desapareció invalida el flujo) y **SALUD** de los runs enlazados por `workflowId` ("N runs, X% ok, último status"; sin runs → untested). Loop: `retrieve_flows` → si válido + sano → `run_saved_workflow` (barato); si no → componer → ejecutar → `save_workflow` (el catálogo crece/mejora). Enlaza con el bucle run-failure→knowledge.
+- **Reuso de flujos validados** (`retrieve_flows`): el agente descubre workflows guardados y los reutiliza en vez de re-componer a ciego — ahorra el costo de razonar/iterar. Dos gates de confianza: **VALIDEZ** (cada flujo se re-valida contra el catálogo ACTUAL de pieces → caza staleness: una piece que cambió o desapareció invalida el flujo) y **SALUD** de los runs enlazados por `workflowId` ("N runs, X% ok, último status"; sin runs → untested). Loop: `retrieve_flows` → si válido + sano → `run_saved_workflow` (barato); si no → componer → ejecutar → `save_workflow` (el catálogo crece/mejora). Enlaza con el bucle run-failure→knowledge. **El MISMO gate de validez+salud alimenta el nivel 3** del descubrimiento (§Descubrimiento de 3 niveles): las recetas válidas+sanas se adjuntan al detalle de cada action.
 - **L3 — runtime assembly**: `POST /agent/context` ensambla el contexto del agente según el contrato CCDD (no-secrets, output-schema, connection-refs, budget).
 - **Backend durable**: vault/store/files sobreviven reinicios (`DATA_DIR`).
 - **Auth por API key** (`X-API-Key` o `Authorization: Bearer`); modo dev abierto si `API_KEYS` no está seteado.
+
+### Descubrimiento de 3 niveles (fractal)
+
+El descubrimiento OKF tiene **tres niveles** que el agente recorre sin cambiar de tool:
+
+| Nivel | Qué descubre | Endpoint / tool | Componente |
+|---|---|---|---|
+| 1 — piece | pieces relevantes + **nombres** de sus actions (hints, sin props) | `retrieve_pieces` · `GET /catalog/pieces` | okf-retriever |
+| 2 — action | las actions DE UNA piece, filtradas por query, con props | `retrieve_actions` · `GET /catalog/pieces/:name/actions` | okf-retriever |
+| 3 — receta | flujos guardados **válidos + sanos** que USAN esa action (top-K más sanos) | se engancha al detalle de cada action del nivel 2 | workflow-registry `buildFlowsByAction` + product-api `handlePieceActions` |
+
+El **nivel 3** es un índice inverso `action → flows` (`buildFlowsByAction` en `workflow-registry/src/retrieve-flows.ts`): para cada flujo **válido** (los inválidos/stale se excluyen — no son receta confiable), y por cada step `(pieceName, actionName)` de su árbol, se indexa bajo `${piece}:${action}`. El handler `handlePieceActions` computa una sola vez el gate de validez+salud — **reusando exactamente el mismo gate de `retrieve_flows`** (`listWorkflowRecords` + runs por `workflowId` + re-validación contra el catálogo actual + `computeFlowHealth`) — y adjunta los top-K flujos a cada action; el render (`renderActionDetail` en `okf-retriever/src/two-level.ts`) añade la sección:
+
+```
+flows que la usan:
+  - [id] name (validity, health)
+```
+
+- **Esparso:** una action sin flujos no añade nada (0 coste) — el render de nivel 2 queda intacto.
+- **Acotado por budget:** los flujos viven dentro del bloque de cada action y se recortan vía `estimateTokens` con el mismo `budget` del endpoint.
+- **Descubrimiento fractal:** piece → action → receta probada que la usa. El agente, buscando una action útil, descubre ahí mismo un flujo reusable (`run_saved_workflow`).
+- **El sistema se abarata con el uso:** cuanto más se usa y se vetan flujos, más recetas válidas indexa el nivel 3 → descubrimiento más rico sin costo extra de contexto.
+
+**Ejemplo verificado** (`packages/product-api/smoke-level3.mjs`): `retrieve_actions(@activepieces/piece-json)` con `q=convert` — el detalle de `convert_text_to_json` trae:
+
+```
+flows que la usan:
+  - [wf-level3-json] Level3 JSON recipe (valid, 2 runs, 100% ok, last SUCCEEDED)
+```
+
+mientras `run_jsonata_query` (otra action de la misma piece, sin receta) **no** trae la sección — esparso, 0 coste.
 
 ### Feature matrix
 
@@ -111,6 +142,7 @@ Detalle técnico y mecanismo del piece-loader: `docs/ANEXO-ARQUITECTURA-MOTOR-AP
 | API HTTP del producto | product-api | ✅ |
 | **Servidor MCP** (12 tools, stdio + HTTP) | a2e-mcp-server | ✅ |
 | **Reuso de flujos** (`retrieve_flows`, validez + salud) | workflow-registry + run-logger | ✅ |
+| **Descubrimiento fractal — nivel 3** (flujos válidos por action, índice inverso) | workflow-registry `buildFlowsByAction` + okf-retriever | ✅ |
 | **Pieces de comando / capacidades declaradas** (`executes-code`) | piece-sdk + piece-source-manager | ✅ |
 | **Run history** (OKF+git, audit/reproduce) | run-logger | ✅ |
 | **Registro de workflows** (guardar/descubrir/re-ejecutar, versionado) | workflow-registry | ✅ |
@@ -148,7 +180,7 @@ Puerto default `:8080` en source; la **imagen Docker** escucha en `:8088` (ver `
 GET  /catalog                                  → índice OKF de pieces (descubrimiento)
 GET  /catalog/retrieve?q=&budget=&mode=        → subconjunto del catálogo acotado a budget (provider okf_catalog)
 GET  /catalog/pieces?q=&budget=                → lista de pieces acotada a budget
-GET  /catalog/pieces/:name/actions?q=&budget=  → actions de una piece (recorta a esa piece del full-catalog)
+GET  /catalog/pieces/:name/actions?q=&budget=  → actions de una piece (recorta a esa piece del full-catalog) + NIVEL 3: adjunta flujos válidos+sanos que usan cada action ("flows que la usan")
 GET  /pieces/:name                             → OKF de una piece (actions/triggers/props)
 POST /execute                                  → { steps:[...] } → ejecuta; validación pre-flight (400 si inválido)
 POST /workflows/validate                       → valida un workflow sin ejecutarlo
@@ -200,7 +232,7 @@ El agente solo emite **referencias** de credenciales (`{{connections['name']}}`)
 
 El paquete `a2e-mcp-server` expone **12 tools** sobre el product-api para que un LLM con tool-calling componga y ejecute workflows A2E, descubra pieces, liste referencias de credenciales (sin secretos) y consulte knowledge/runs — **sin escribir código ni ver secretos**.
 
-**Tools:** `retrieve_catalog`, `retrieve_pieces`, `retrieve_actions`, `get_piece`, `list_connections`, `execute_workflow`, `save_workflow`, `list_workflows`, `run_saved_workflow`, **`retrieve_flows`** (descubre workflows guardados para reuso, con gates de validez+salud), `query_knowledge`, `query_runs`.
+**Tools:** `retrieve_catalog`, `retrieve_pieces`, `retrieve_actions` (nivel 2 + **nivel 3**: adjunta al detalle de cada action los flujos válidos+sanos que la usan), `get_piece`, `list_connections`, `execute_workflow`, `save_workflow`, `list_workflows`, `run_saved_workflow`, **`retrieve_flows`** (descubre workflows guardados para reuso, con gates de validez+salud — el mismo gate que alimenta el nivel 3), `query_knowledge`, `query_runs`.
 
 Dos formas de conectarlo:
 
